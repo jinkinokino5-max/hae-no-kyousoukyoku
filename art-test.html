@@ -3,76 +3,112 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ピクセルアート確認（Step 3）</title>
+<title>ピクセルアート確認</title>
 <style>
   body { margin: 0; padding: 16px; background: #1a120c; color: #e6d6b8; font: 14px/1.6 sans-serif; }
   h1 { font-size: 16px; margin: 0 0 8px; }
+  h2 { font-size: 14px; margin: 16px 0 4px; }
   .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
-  input { width: 90px; }
+  input[type=number] { width: 70px; }
   canvas { image-rendering: pixelated; display: block; }
-  #screen { width: min(1024px, 100%); aspect-ratio: 256 / 144; height: auto; cursor: crosshair; }
-  #items { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 16px; }
-  .cell { background: #94532a; padding: 8px; text-align: center; }
+  #screen { width: min(1024px, 100%); aspect-ratio: 512 / 288; height: auto; cursor: crosshair; }
+  .items { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; }
+  .cell { background: #94532a; padding: 8px; text-align: center; min-width: 120px; }
+  .cell canvas { margin: 0 auto; }
   .cell small { display: block; color: #fcf4e2; }
   .note { color: #bba88a; font-size: 12px; }
 </style>
 </head>
 <body>
-<h1>ピクセルアート確認（机＋8アイテム）</h1>
+<h1>ピクセルアート確認（無限の机 2x2区画＋24アイテム）</h1>
 <div class="bar">
-  <label>机のシード <input id="seed" type="number" value="1"></label>
+  <label>左上の区画 cx <input id="cx" type="number" value="-1"></label>
+  <label>cy <input id="cy" type="number" value="-1"></label>
+  <label>シード <input id="seed" type="number" value="7"></label>
+  <label><input id="grid" type="checkbox"> 区画の境界線を表示</label>
   <button id="regen">再生成</button>
-  <button id="random">ランダム</button>
   <button id="reset">アイテムを元に戻す</button>
-  <span class="note">机をクリックすると、その位置のアイテムが削れる（マスク動作の確認）</span>
+  <span id="time" class="note"></span>
 </div>
-<canvas id="screen" width="256" height="144"></canvas>
-<div id="items"></div>
+<div class="note">4区画（各256x144）を makeDeskChunk で並べています。中央の十字が区画の境界です（境界線を消した状態で継ぎ目が見えなければ合格）。机をクリックすると、その位置のアイテムが削れます。</div>
+<canvas id="screen" width="512" height="288"></canvas>
+<h2>アイテム（24種）</h2>
+<div id="items" class="items"></div>
+<h2>レコードの variant 0〜7</h2>
+<div id="records" class="items"></div>
 
 <script type="module">
-import { makeDesk, makeItem, drawItem, bite, ITEM_NAMES, ITEM_LABELS } from './src/pixelart.js';
+import { makeDeskChunk, makeItem, drawItem, bite, ITEM_NAMES, ITEM_LABELS, RECORD_VARIANTS } from './src/pixelart.js';
 
-const W = 256, H = 144;
+const CW = 256, CH = 144, W = CW * 2, H = CH * 2;
 const screen = document.getElementById('screen');
 const ctx = screen.getContext('2d');
-const LAYOUT = {
-  banana: [22, 26], mapo: [64, 20], sugar: [114, 30], bread: [150, 22],
-  record: [28, 78], manga: [86, 74], radio: [136, 84], pen: [190, 100],
-};
-let desk, items;
+let chunks = [], items;
 
 function build() {
-  const seed = parseInt(document.getElementById('seed').value, 10) || 1;
-  const t0 = performance.now();
-  desk = makeDesk(W, H, seed);
-  console.log(`makeDesk: ${(performance.now() - t0).toFixed(1)}ms`);
+  const cx0 = parseInt(document.getElementById('cx').value, 10) || 0;
+  const cy0 = parseInt(document.getElementById('cy').value, 10) || 0;
+  const seed = parseInt(document.getElementById('seed').value, 10) || 7;
+  chunks = [];
+  const times = [];
+  for (let j = 0; j < 2; j++) for (let i = 0; i < 2; i++) {
+    const t0 = performance.now();
+    chunks.push({ cv: makeDeskChunk(cx0 + i, cy0 + j, CW, CH, seed), x: i * CW, y: j * CH });
+    times.push(performance.now() - t0);
+  }
+  document.getElementById('time').textContent =
+    `makeDeskChunk: ${times.map((t) => t.toFixed(1)).join(' / ')} ms`;
   if (!items) resetItems();
   render();
 }
+
 function resetItems() {
-  items = ITEM_NAMES.map((n) => ({ item: makeItem(n), x: LAYOUT[n][0], y: LAYOUT[n][1] }));
+  // 24アイテムを 8列x3行 に並べる（区画の境界をまたぐ位置にも置く）
+  items = ITEM_NAMES.map((n, i) => {
+    const it = makeItem(n);
+    const col = i % 8, row = Math.floor(i / 8);
+    const x = 16 + col * 62 + ((32 - it.w) >> 1);
+    const y = 24 + row * 90 + ((32 - it.h) >> 1);
+    return { item: it, x, y };
+  });
 }
+
+function cellOf(it, label) {
+  const Z = 5;
+  const c = document.createElement('canvas');
+  c.width = it.w * Z; c.height = it.h * Z;
+  const g = c.getContext('2d');
+  g.imageSmoothingEnabled = false;
+  g.drawImage(it.canvas, 0, 0, c.width, c.height);
+  const cell = document.createElement('div');
+  cell.className = 'cell';
+  cell.appendChild(c);
+  const s = document.createElement('small');
+  s.textContent = label;
+  cell.appendChild(s);
+  return cell;
+}
+
 function render() {
-  ctx.drawImage(desk, 0, 0);
+  for (const c of chunks) ctx.drawImage(c.cv, c.x, c.y);
+  if (document.getElementById('grid').checked) {
+    ctx.fillStyle = 'rgba(120,220,255,0.8)';
+    ctx.fillRect(CW, 0, 1, H);
+    ctx.fillRect(0, CH, W, 1);
+  }
   for (const o of items) drawItem(ctx, o.item, o.x, o.y);
   const box = document.getElementById('items');
   box.innerHTML = '';
-  const Z = 6;
   for (const o of items) {
     const it = o.item;
-    const c = document.createElement('canvas');
-    c.width = it.w * Z; c.height = it.h * Z;
-    const g = c.getContext('2d');
-    g.imageSmoothingEnabled = false;
-    g.drawImage(it.canvas, 0, 0, c.width, c.height);
-    const cell = document.createElement('div');
-    cell.className = 'cell';
-    cell.appendChild(c);
-    const label = document.createElement('small');
-    label.textContent = `${ITEM_LABELS[it.name]}  ${it.w}x${it.h}  残り${Math.round((it.remaining / it.total) * 100)}%`;
-    cell.appendChild(label);
-    box.appendChild(cell);
+    box.appendChild(cellOf(it, `${ITEM_LABELS[it.name]}  ${it.w}x${it.h}  残り${Math.round((it.remaining / it.total) * 100)}%`));
   }
+}
+
+function renderRecords() {
+  const box = document.getElementById('records');
+  box.innerHTML = '';
+  for (let v = 0; v < RECORD_VARIANTS; v++) box.appendChild(cellOf(makeItem('record', { variant: v }), `variant ${v}`));
 }
 
 screen.addEventListener('click', (e) => {
@@ -83,11 +119,9 @@ screen.addEventListener('click', (e) => {
   render();
 });
 document.getElementById('regen').onclick = build;
-document.getElementById('random').onclick = () => {
-  document.getElementById('seed').value = Math.floor(Math.random() * 100000);
-  build();
-};
+document.getElementById('grid').onchange = render;
 document.getElementById('reset').onclick = () => { resetItems(); render(); };
+renderRecords();
 build();
 </script>
 </body>

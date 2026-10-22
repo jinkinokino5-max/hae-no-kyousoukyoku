@@ -9,11 +9,15 @@
 // 公開API
 //   PALETTE                     … 色定義（唯一の定義場所）
 //   makeDesk(W, H, seed)        … チーク材の机。canvas を返す（1回だけ生成して使い回す）
-//   makeItem(name)              … { name, w, h, canvas, shadow, mask, total, remaining }
+//   makeDeskChunk(cx, cy, w, h, seed) … 無限に広がる机の1区画（世界座標 (cx*w, cy*h) から w×h）。
+//                                 隣の区画と継ぎ目なくつながる。決定的。1区画 約6ms(Node)
+//   makeItem(name, opts)        … { name, variant, w, h, canvas, shadow, mask, total, remaining }
+//                                 opts.variant: record のラベル色 0〜7（RECORD_VARIANTS 個）
 //   drawItem(ctx, item, x, y)   … 影＋本体を描く
 //   bite(item, cx, cy, r)       … アイテム座標で半径rを削る。削れたピクセル数を返す
-//   ITEM_NAMES                  … 8アイテムのキー
-//   makeDeskPixels / makeItemPixels … canvas を使わない版（Node での確認用）
+//   ITEM_NAMES / ITEM_LABELS    … 24アイテムのキーと日本語名
+//   ITEM_KIND                   … 'food' | 'culture'
+//   makeDeskPixels / makeDeskChunkPixels / makeItemPixels … canvas を使わない版（Node での確認用）
 
 // ---------------------------------------------------------------------------
 // パレット（全体で共有する唯一の色定義）
@@ -61,6 +65,16 @@ export const PALETTE = [
   ['sage',      '#8e9a6a'],
   ['sageLt',    '#b2bc88'],
   ['sageDk',    '#5f6a44'],
+  // ---- 以下は追加色（既存の番号を変えないよう末尾に足す） ----
+  ['greenLt',   '#a8d46a'], // 若葉、スイカの皮の明部
+  ['greenDk',   '#3e7a2c'], // ヘタ、スイカの縞
+  ['purple',    '#6e4a9e'], // 絵の具、レコードのラベル
+  ['purpleLt',  '#a988d4'],
+  ['salmon',    '#f49060'], // 寿司のサーモン、橙のラベル
+  ['salmonLt',  '#fac09a'], // サーモンの脂の筋
+  ['plum',      '#9c2a46'], // 梅干し
+  ['pink',      '#f2a2b0'], // 梅干しのつや、ラベル
+  ['coffee',    '#3a2016'], // コーヒーの液面
 ];
 
 const C = {};               // 名前 -> パレット番号
@@ -246,6 +260,91 @@ export function makeDesk(W = 256, H = 144, seed = 1) {
 }
 
 // ---------------------------------------------------------------------------
+// 無限に広がる机（区画 = チャンク）
+// ---------------------------------------------------------------------------
+// すべてを「世界座標 (X,Y) の関数」として決めるので、どの区画を先に作っても
+// 境界で必ずつながる。区画の大きさ w,h は全区画で同じ値を使うこと。
+//
+// 板の割り付け（世界共通）
+//   - 板の段：Y方向に BOARD_P ごとの境界を、段ごとに ±5px ずらす（段の高さ 26〜46px）
+//   - 板の端の継ぎ目：段ごとに X方向へ JOINT_P ごと、±70px ずらす（板の長さ 60〜340px）
+//   - 木目・杢・色差は「段×板」ごとのシードで、世界座標から計算
+const BOARD_P = 36;
+const JOINT_P = 200;
+
+function boardEdge(k, s) { return k * BOARD_P + Math.floor((hash2(k, 11, s) - 0.5) * 10); }
+function boardIndexAt(Y, s) {
+  let k = Math.floor(Y / BOARD_P);
+  while (boardEdge(k, s) > Y) k--;
+  while (boardEdge(k + 1, s) <= Y) k++;
+  return k;
+}
+function jointX(k, j, s) { return j * JOINT_P + Math.floor((hash2(k, j, s + 5) - 0.5) * 140); }
+function plankIndexAt(k, X, s) {
+  let j = Math.floor(X / JOINT_P);
+  while (jointX(k, j, s) > X) j--;
+  while (jointX(k, j + 1, s) <= X) j++;
+  return j;
+}
+
+export function makeDeskChunkPixels(cx, cy, w = 256, h = 144, seed = 7) {
+  cx |= 0; cy |= 0;
+  const s = (Math.floor(mulberry32(seed)() * 1e6)) | 0;
+  const levels = [C.teak0, C.teak1, C.teak2, C.teak3, C.teak4];
+  const idx = new Uint8Array(w * h);
+  const X0 = cx * w, Y0 = cy * h;
+
+  for (let y = 0; y < h; y++) {
+    const Y = Y0 + y;
+    const k = boardIndexAt(Y, s);
+    const top = boardEdge(k, s);
+    const bh = boardEdge(k + 1, s) - top;
+    const ly = Y - top;
+    const period = 4.2 + hash2(k, 3, s + 9) * 1.6; // 木目の間隔は段ごと
+    let j = plankIndexAt(k, X0, s);
+    let jx = jointX(k, j, s), nx = jointX(k, j + 1, s);
+    let ps = 0, tone = 0;
+    const setPlank = () => {
+      ps = Math.floor(hash2(k, j, s + 21) * 1e6);
+      tone = (hash2(k, j, s + 33) - 0.5) * 0.12; // 板ごとのわずかな色差
+    };
+    setPlank();
+    const row = y * w;
+    const ditherRow = (Y & 3) * 4;
+    for (let x = 0; x < w; x++) {
+      const X = X0 + x;
+      if (X >= nx) { j++; jx = nx; nx = jointX(k, j + 1, s); setPlank(); }
+      if (ly === 0 || X === jx) { idx[row + x] = C.teakSeam; continue; }
+      const lf = fbm(X * 0.010, Y * 0.045, ps, 3);
+      const warp = (fbm(X * 0.008, ly * 0.03, ps + 1, 2) - 0.5) * 16
+                 + (valueNoise(X * 0.12, Y * 0.5, ps + 2) - 0.5) * 1.4;
+      const g = (ly + warp) / period;
+      const stripe = g - Math.floor(g);
+      let grain = 0;
+      if (stripe < 0.2 && valueNoise(X * 0.035, g * 0.7, ps + 3) > 0.42) grain = 1;
+
+      let v = 0.53 + tone + (lf - 0.5) * 0.5 - grain * 0.16;
+      if (ly === 1) v += 0.16;          // 継ぎ目直下の面取りの光
+      if (ly === bh - 1) v -= 0.10;     // 板の下端
+      if (X === jx + 1) v += 0.14;
+      if (X === nx - 1) v -= 0.10;
+      if (hash2(X >> 1, Y, s) < 0.006) v -= 0.22; // 導管
+
+      let q = Math.round(v * 4 + BAYER4[ditherRow + (X & 3)] * 0.55);
+      q = q < 0 ? 0 : q > 4 ? 4 : q;
+      idx[row + x] = levels[q];
+    }
+  }
+  return { w, h, idx };
+}
+
+// 区画 (cx,cy) の机。世界座標 (cx*w, cy*h) から w×h の範囲を描く。
+export function makeDeskChunk(cx, cy, w = 256, h = 144, seed = 7) {
+  const p = makeDeskChunkPixels(cx, cy, w, h, seed);
+  return indexedToCanvas(p.w, p.h, p.idx);
+}
+
+// ---------------------------------------------------------------------------
 // アイテム描画用の小さな道具（パレット番号で描く）
 // ---------------------------------------------------------------------------
 class Pix {
@@ -311,8 +410,28 @@ class Pix {
   }
 }
 
+// レコードのラベル色（variant 0〜7）：[外側, 内側, 文字]
+const RECORD_LABELS = [
+  [C.red, C.redLt, C.white],        // 0 赤（従来の色）
+  [C.blue, C.blueLt, C.white],      // 1 青
+  [C.yellow, C.yellowLt, C.brown],  // 2 黄
+  [C.green, C.greenLt, C.white],    // 3 緑
+  [C.purple, C.purpleLt, C.white],  // 4 紫
+  [C.cream, C.white, C.inkLt],      // 5 白
+  [C.pink, C.white, C.plum],        // 6 桃
+  [C.salmon, C.yellowLt, C.redDk],  // 7 橙
+];
+export const RECORD_VARIANTS = RECORD_LABELS.length;
+
+// 点 (px,py) と線分 (ax,ay)-(bx,by) の距離（角の丸い形を作る用）
+function segDist(px, py, ax, ay, bx, by) {
+  const vx = bx - ax, vy = by - ay;
+  const t = Math.max(0, Math.min(1, ((px - ax) * vx + (py - ay) * vy) / (vx * vx + vy * vy)));
+  return Math.hypot(px - ax - vx * t, py - ay - vy * t);
+}
+
 // ---------------------------------------------------------------------------
-// 8アイテム（すべて 1px の輪郭を含めたサイズ）
+// アイテム（すべて 1px の輪郭を含めたサイズ）
 // ---------------------------------------------------------------------------
 const ITEMS = {
   // バナナ 28x16：2つの楕円の差で三日月形を作る
@@ -403,7 +522,9 @@ const ITEMS = {
   },
 
   // レコード 28x28：溝の同心円、赤いラベル、中央の穴は透明
-  record() {
+  record(opts = {}) {
+    const v = ((opts.variant | 0) % RECORD_LABELS.length + RECORD_LABELS.length) % RECORD_LABELS.length;
+    const [lblDk, lblLt, lblText] = RECORD_LABELS[v];
     const p = new Pix(28, 28);
     const cx = 14, cy = 14;
     p.fill((x, y) => {
@@ -416,15 +537,15 @@ const ITEMS = {
         const dx = x + 0.5 - cx, dy = y + 0.5 - cy;
         const d = Math.hypot(dx, dy);
         if (d < 1.2) { p.set(x, y, 0); continue; }            // 穴
-        if (d < 4.6) { p.set(x, y, d < 2.2 ? C.redLt : C.red); continue; } // ラベル
+        if (d < 4.6) { p.set(x, y, d < 2.2 ? lblLt : lblDk); continue; } // ラベル
         // 光沢（左上と右下の扇形）
         const a = Math.atan2(dy, dx);
         const sheen = Math.abs(Math.sin(a - Math.PI / 4)) > 0.93;
         if ((d > 6.5 && d < 7.5) || (d > 9.5 && d < 10.5)) p.set(x, y, C.inkLt); // 溝
         if (sheen && d > 5.5 && d < 12) p.set(x, y, d > 8 && d < 10 ? C.gray : C.inkLt);
       }
-    p.set(12, 13, C.white); // ラベルの小さな文字
-    p.set(15, 15, C.white);
+    p.set(12, 13, lblText); // ラベルの小さな文字
+    p.set(15, 15, lblText);
     p.outline();
     return p;
   },
@@ -498,28 +619,459 @@ const ITEMS = {
     p.outline();
     return p;
   },
+
+  // ===== 追加の食べ物 =====
+
+  // りんご 18x19：2つのふくらみ、つやの白、茶色の軸と若葉
+  apple() {
+    const p = new Pix(18, 19);
+    p.ellipse(6.6, 11.4, 5.4, 6.2, C.red);
+    p.ellipse(11.4, 11.4, 5.4, 6.2, C.red);
+    p.ellipse(9, 12.4, 6.4, 5.8, C.red);
+    p.shade(C.red, C.redLt, C.redDk);
+    p.fill((x, y) => p.get(x, y) === C.red && x >= 12 && y >= 13, C.redDk); // 右下の陰
+    p.set(5, 8, C.white); p.set(4, 9, C.white); p.set(4, 10, C.redLt); p.set(6, 8, C.redLt);
+    p.set(9, 6, C.redDk); // 軸のくぼみ
+    p.line(9, 5, 10, 1, C.brown);
+    // 葉
+    [[11, 3], [12, 3], [13, 3], [12, 2], [13, 2], [14, 2]].forEach(([x, y]) => p.set(x, y, C.green));
+    p.set(14, 1, C.greenLt); p.set(13, 1, C.greenLt);
+    p.set(12, 3, C.greenDk);
+    p.outline();
+    return p;
+  },
+
+  // 寿司（サーモンのにぎり） 22x14：白いシャリにサーモン、脂の白い筋
+  sushi() {
+    const p = new Pix(22, 14);
+    p.ellipse(11, 9, 9.4, 3.8, C.white);              // シャリ
+    p.shade(C.white, 0, C.creamDk);
+    [[5, 10], [8, 11], [12, 11], [15, 10], [17, 9], [10, 12], [6, 8], [16, 12]]
+      .forEach(([x, y]) => { if (p.get(x, y) === C.white) p.set(x, y, C.cream); });
+    // ネタ（シャリより少し大きく、上にかぶせる）
+    p.fill((x, y) => {
+      const dx = (x + 0.5 - 11) / 10, dy = (y + 0.5 - 6.2) / 3.6;
+      return dx * dx + dy * dy <= 1;
+    }, C.salmon);
+    p.shade(C.salmon, C.salmonLt, C.redLt);
+    // 脂の筋（斜めの縞）
+    p.fill((x, y) => p.get(x, y) === C.salmon && (x + y) % 4 === 0, C.salmonLt);
+    p.set(5, 4, C.white); p.set(6, 4, C.white); // つや
+    p.outline();
+    return p;
+  },
+
+  // ショートケーキ 20x21：三角に切った一切れ。断面にスポンジとクリーム、苺の層、上に苺
+  cake() {
+    const p = new Pix(20, 21);
+    // 上面（三角）：手前の辺 y=8、x=1..12、奥の頂点 (18,3)
+    p.fill((x, y) => {
+      if (y < 3 || y > 8) return false;
+      const xr = 12 + ((8 - y) / 5) * 6; // 右辺
+      const xl = 1 + ((8 - y) / 5) * 15; // 左辺（奥へ狭まる）
+      return x >= xl && x <= xr;
+    }, C.white);
+    // 側面（右奥のクリーム面）
+    p.fill((x, y) => {
+      if (x < 13 || x > 18) return false;
+      const t = (x - 12) / 6;
+      const yt = 8 - t * 5, yb = 18 - t * 5;
+      return y > yt && y <= yb;
+    }, C.cream);
+    p.fill((x, y) => p.get(x, y) === C.cream && x >= 17, C.creamDk);
+    // 断面（手前）
+    for (let y = 9; y <= 18; y++) for (let x = 1; x <= 12; x++) {
+      let c = C.crumb;                         // スポンジ
+      if (y === 9) c = C.white;                // 上のクリーム
+      else if (y === 13 || y === 14) c = C.white; // 中のクリーム
+      else if (y === 18) c = C.crumbDk;        // 底
+      p.set(x, y, c);
+    }
+    // 中の苺の断面
+    [2, 6, 10].forEach((x) => {
+      p.set(x, 13, C.red); p.set(x + 1, 13, C.red);
+      p.set(x, 14, C.redLt); p.set(x + 1, 14, C.red);
+    });
+    // スポンジの気泡
+    [[3, 11], [8, 10], [11, 11], [5, 16], [9, 17], [2, 16]].forEach(([x, y]) => p.set(x, y, C.crumbDk));
+    p.set(1, 10, C.yellowLt); p.set(1, 15, C.yellowLt);
+    // 上の苺
+    p.ellipse(9, 5, 2.4, 2.2, C.red);
+    p.set(8, 4, C.redLt); p.set(10, 6, C.redDk); p.set(9, 6, C.redDk);
+    p.set(9, 2, C.green); p.set(8, 2, C.greenDk); p.set(10, 2, C.greenDk);
+    // 絞りクリーム
+    p.set(14, 5, C.cream); p.set(5, 7, C.cream);
+    p.outline();
+    return p;
+  },
+
+  // コーヒー 20x20：受け皿にカップ、黒い液面に泡の縁、湯気
+  coffee() {
+    const p = new Pix(20, 20);
+    p.ellipse(10, 15.4, 9, 3.4, C.white);             // 受け皿
+    p.shade(C.white, 0, C.creamDk);
+    p.ellipse(10, 15.4, 5.6, 1.8, C.cream);
+    // カップの胴
+    p.fill((x, y) => {
+      if (y < 7 || y > 15) return false;
+      const half = 5.6 - Math.max(0, y - 12) * 0.7;
+      return Math.abs(x + 0.5 - 9.5) <= half;
+    }, C.white);
+    p.fill((x, y) => p.get(x, y) === C.white && y >= 7 && y <= 15 && x >= 12 && x <= 15 && y < 16, C.cream);
+    p.fill((x, y) => p.get(x, y) === C.cream && x >= 14 && y >= 8 && y <= 15, C.creamDk);
+    // 取っ手
+    [[16, 8], [17, 8], [17, 9], [17, 10], [17, 11], [16, 12]].forEach(([x, y]) => p.set(x, y, C.cream));
+    // 口縁と液面
+    p.ellipse(9.5, 7, 6, 2.2, C.white);
+    p.ellipse(9.5, 7.2, 4.8, 1.5, C.coffee);
+    p.set(6, 7, C.crustDk); p.set(12, 7, C.crustDk); p.set(8, 8, C.crustDk); // 泡の縁
+    p.set(7, 7, C.brown);
+    // 湯気（輪郭なしで淡く見せたいので、輪郭の後に置く）
+    p.outline();
+    [[8, 3], [9, 2], [9, 1], [11, 4], [12, 3], [11, 2]].forEach(([x, y]) => p.set(x, y, C.cream));
+    return p;
+  },
+
+  // 梅干し 18x14：白い小皿に、しわのある赤紫の梅
+  umeboshi() {
+    const p = new Pix(18, 14);
+    p.ellipse(9, 9, 8, 4.2, C.white);
+    p.shade(C.white, 0, C.creamDk);
+    p.ellipse(9, 9.2, 6, 2.6, C.cream);
+    p.ellipse(9, 6.4, 5.4, 4.8, C.plum);
+    p.shade(C.plum, C.red, C.redDk);
+    [[7, 6], [10, 8], [9, 5], [12, 6], [8, 9], [11, 4], [6, 8]].forEach(([x, y]) => p.set(x, y, C.redDk)); // しわ
+    p.set(6, 4, C.pink); p.set(5, 5, C.pink); p.set(7, 3, C.red); // つや
+    p.set(9, 2, C.brown);
+    p.outline();
+    return p;
+  },
+
+  // スイカ 24x17：扇形の一切れ。赤い実、白い層、緑の皮（縞）、黒い種
+  watermelon() {
+    const p = new Pix(24, 17);
+    const cx = 12, cy = 1.2, R = 14.6, half = (50 * Math.PI) / 180;
+    for (let y = 0; y < 17; y++)
+      for (let x = 0; x < 24; x++) {
+        const dx = x + 0.5 - cx, dy = y + 0.5 - cy;
+        const d = Math.hypot(dx, dy);
+        if (d > R || dy <= 0) continue;
+        if (Math.abs(Math.atan2(dx, dy)) > half) continue;
+        let c = C.red;
+        if (d > R - 1.3) c = (Math.floor(Math.atan2(dx, dy) * 9) & 1) ? C.greenDk : C.green;
+        else if (d > R - 2.3) c = C.greenLt;
+        else if (d > R - 3.2) c = C.white;
+        p.set(x, y, c);
+      }
+    // 実の明暗（左側を明るく）
+    p.fill((x, y) => p.get(x, y) === C.red && x < 9 && y > 3 && (x + y) % 3 === 0, C.redLt);
+    p.fill((x, y) => p.get(x, y) === C.red && x > 16, C.red);
+    // 種
+    [[9, 7], [14, 7], [11, 10], [7, 10], [16, 10], [12, 4]].forEach(([x, y]) => p.set(x, y, C.ink));
+    p.outline();
+    return p;
+  },
+
+  // 唐辛子 22x11：曲がった赤い実が先へ細くなる。左に緑のヘタ
+  chili() {
+    const p = new Pix(22, 12);
+    for (let i = 0; i <= 60; i++) {
+      const t = i / 60;
+      const x = 5.4 + t * 14.2, y = 4.6 + t * t * 4;
+      const r = 3.2 * (1 - t) + 0.55;
+      p.ellipse(x, y, r, r, C.red);
+    }
+    p.shade(C.red, C.redLt, C.redDk);
+    p.set(7, 3, C.white); p.set(8, 3, C.redLt); p.set(9, 3, C.redLt); // つや
+    // ヘタと軸
+    p.rect(2, 2, 3, 5, C.green);
+    p.set(4, 2, C.greenDk); p.set(4, 6, C.greenDk); p.set(4, 4, C.greenDk);
+    p.set(1, 3, C.green); p.set(1, 1, C.greenDk); p.set(0, 0, 0);
+    p.line(2, 2, 1, 1, C.greenDk);
+    p.outline();
+    return p;
+  },
+
+  // おにぎり 20x18：角の丸い三角に、海苔の帯
+  onigiri() {
+    const p = new Pix(20, 18);
+    const A = [10, 3.6], B = [3.8, 14.2], D = [16.2, 14.2], r = 2.6;
+    const inTri = (x, y) => {
+      const s = (ax, ay, bx, by) => (bx - ax) * (y - ay) - (by - ay) * (x - ax);
+      const a = s(A[0], A[1], B[0], B[1]), b = s(B[0], B[1], D[0], D[1]), c = s(D[0], D[1], A[0], A[1]);
+      return (a >= 0 && b >= 0 && c >= 0) || (a <= 0 && b <= 0 && c <= 0);
+    };
+    p.fill((x, y) => {
+      const px = x + 0.5, py = y + 0.5;
+      return inTri(px, py) || segDist(px, py, ...A, ...B) <= r || segDist(px, py, ...B, ...D) <= r ||
+        segDist(px, py, ...D, ...A) <= r;
+    }, C.white);
+    p.shade(C.white, 0, C.creamDk);
+    [[8, 6], [11, 8], [6, 11], [13, 12], [9, 10], [14, 9], [5, 14]]
+      .forEach(([x, y]) => { if (p.get(x, y) === C.white) p.set(x, y, C.cream); });
+    // 海苔
+    p.fill((x, y) => p.get(x, y) && x >= 7 && x <= 12 && y >= 11, C.ink);
+    p.fill((x, y) => p.get(x, y) === C.ink && x === 7, C.inkLt);
+    p.set(8, 12, C.inkLt);
+    p.outline();
+    return p;
+  },
+
+  // ===== 追加の文化物 =====
+
+  // 楽譜 22x26：紙に五線2段、音符、ト音記号、右上の折れ
+  sheetmusic() {
+    const p = new Pix(22, 26);
+    p.rect(1, 1, 19, 24, C.white);
+    for (let y = 2; y <= 24; y++) p.set(20, y, y % 2 ? C.cream : C.creamDk); // 下の紙の小口
+    p.rect(2, 25, 19, 0, C.cream);
+    // 折れた角
+    p.set(19, 1, 0); p.set(18, 1, 0); p.set(19, 2, 0);
+    p.set(17, 1, C.cream); p.set(18, 2, C.cream); p.set(19, 3, C.creamDk); p.set(17, 2, C.creamDk);
+    // 題名
+    [4, 5, 7, 8, 9].forEach((x) => p.set(x, 3, C.red));
+    // 五線
+    [6, 16].forEach((top) => {
+      for (let l = 0; l < 5; l++) for (let x = 2; x <= 18; x++) p.set(x, top + l * 2, C.silver);
+      // ト音記号（縦の線と巻き）
+      for (let y = top - 1; y <= top + 9; y++) p.set(4, y, C.inkLt);
+      p.set(5, top + 3, C.inkLt); p.set(5, top + 6, C.inkLt); p.set(3, top + 5, C.inkLt);
+      p.set(3, top + 9, C.inkLt);
+    });
+    // 音符（2x2の玉と棒）
+    const note = (x, y, up = true) => {
+      p.rect(x, y, 2, 2, C.ink);
+      if (up) for (let i = 1; i <= 4; i++) p.set(x + 1, y - i, C.ink);
+      else for (let i = 1; i <= 4; i++) p.set(x, y + 1 + i, C.ink);
+    };
+    note(7, 11); note(10, 9); note(13, 12); note(16, 10);
+    note(7, 19); note(10, 21); note(13, 18, false); note(16, 20);
+    p.line(8, 7, 11, 5, C.ink); // 連桁
+    p.outline();
+    return p;
+  },
+
+  // オルゴール 24x20：蓋の開いた木箱。内側に赤いビロード、金の櫛歯と円筒
+  musicbox() {
+    const p = new Pix(24, 20);
+    // 蓋（奥に開いている）
+    p.rect(2, 1, 20, 7, C.crustDk);
+    p.rect(4, 2, 16, 5, C.redDk);
+    p.rect(4, 2, 16, 1, C.red);
+    p.set(5, 4, C.red); p.set(12, 5, C.red);
+    // 中の機械（上から見た開口部）
+    p.rect(1, 8, 22, 3, C.brown);
+    p.rect(3, 8, 10, 2, C.yellow);                       // 円筒
+    for (let x = 3; x <= 12; x += 2) p.set(x, 9, C.yellowDk); // ピン
+    p.set(3, 8, C.yellowLt); p.set(4, 8, C.yellowLt);
+    for (let x = 14; x <= 20; x++) p.set(x, 9, x % 2 ? C.silver : C.gray); // 櫛歯
+    p.set(14, 8, C.silver); p.set(20, 8, C.gray);
+    // 箱の正面
+    p.rect(1, 11, 22, 8, C.crust);
+    p.shade(C.crust, C.teak4, C.crustDk);
+    p.rect(3, 13, 18, 4, C.teak3);                      // はめ込みの板
+    p.set(3, 13, C.teak4);
+    p.rect(11, 14, 2, 2, C.yellow);                     // 鍵穴の金具
+    p.set(12, 15, C.ink);
+    // ぜんまいのつまみ
+    p.set(23, 13, C.silver); p.set(23, 14, C.gray);
+    p.outline();
+    return p;
+  },
+
+  // 置き時計 18x21：金の丸い枠、白い文字盤、2つのベル、脚
+  clock() {
+    const p = new Pix(18, 21);
+    // ベル
+    p.ellipse(4, 4, 2.6, 2.4, C.yellow);
+    p.ellipse(14, 4, 2.6, 2.4, C.yellow);
+    p.rect(8, 2, 2, 2, C.yellowDk); // つまみ
+    // 胴
+    p.ellipse(9, 11.5, 7.4, 7.4, C.yellow);
+    p.shade(C.yellow, C.yellowLt, C.yellowDk);
+    p.ellipse(9, 11.5, 5.6, 5.6, C.white);
+    p.fill((x, y) => p.get(x, y) === C.white && (x >= 12 && y >= 12), C.cream);
+    // 目盛り
+    [[9, 7], [9, 16], [4, 11], [13, 11]].forEach(([x, y]) => p.set(x, y, C.inkLt));
+    // 針
+    p.line(9, 11, 9, 8, C.ink);
+    p.line(9, 11, 11, 12, C.ink);
+    p.set(10, 13, C.red); p.set(11, 14, C.red); // 秒針
+    // 脚
+    p.set(4, 19, C.ink); p.set(3, 20, C.ink);
+    p.set(14, 19, C.ink); p.set(15, 20, C.ink);
+    p.set(3, 3, C.yellowLt); p.set(13, 3, C.yellowLt);
+    p.outline();
+    return p;
+  },
+
+  // 風鈴 16x26：ガラスの鈴（金魚の絵）、糸、赤い短冊
+  windchime() {
+    const p = new Pix(16, 26);
+    // ガラスの鈴（おわん形を伏せた形）。透明感を出すため白と水色を混ぜる
+    p.fill((x, y) => {
+      const dx = (x + 0.5 - 8) / 6.6, dy = (y + 0.5 - 9) / 8;
+      return y >= 1 && y <= 9 && dx * dx + dy * dy <= 1;
+    }, C.blueLt);
+    p.shade(C.blueLt, C.white, C.blue);
+    p.fill((x, y) => p.get(x, y) === C.blueLt && y >= 4 && x >= 3 && x <= 6, C.white); // 大きなつや
+    p.fill((x, y) => p.get(x, y) && y === 9, C.blue); // 口の縁
+    // 金魚の絵付け
+    [[9, 5], [10, 5], [10, 6], [9, 6], [11, 5]].forEach(([x, y]) => p.set(x, y, C.red));
+    p.set(12, 4, C.redLt); p.set(12, 6, C.redLt); p.set(9, 5, C.redLt);
+    p.set(5, 7, C.green); p.set(6, 6, C.green); // 水草
+    // 舌（ガラス玉）と糸
+    p.set(8, 10, C.silver);
+    for (let y = 11; y <= 13; y++) p.set(8, y, C.gray);
+    // 短冊（白い紙、少し風に揺れて右へずれる。墨の一筆）
+    p.rect(6, 14, 5, 6, C.white);
+    p.rect(7, 20, 5, 6, C.white);
+    p.fill((x, y) => p.get(x, y) === C.white && ((y < 20 && x === 10) || (y >= 20 && x === 11)), C.cream);
+    p.set(8, 16, C.blue); p.set(8, 17, C.blue); p.set(9, 18, C.blue); p.set(9, 21, C.blue); p.set(9, 22, C.blue);
+    p.set(8, 0, C.gray); // 吊り紐
+    p.outline();
+    return p;
+  },
+
+  // ろうそく 12x24：炎、芯、白い胴としずく、金の燭台
+  candle() {
+    const p = new Pix(12, 24);
+    // 炎（しずく形）
+    p.fill((x, y) => {
+      if (y < 1 || y > 6) return false;
+      const w = y <= 2 ? 0.6 : y <= 4 ? 1.4 : 1.6;
+      return Math.abs(x + 0.5 - 6) <= w;
+    }, C.yellow);
+    p.set(6, 1, C.yellowLt); p.set(6, 3, C.yellowLt); p.set(5, 4, C.yellowLt); p.set(6, 4, C.white); p.set(6, 5, C.white);
+    p.set(7, 6, C.redLt); p.set(5, 6, C.redLt);
+    p.set(6, 7, C.ink); // 芯
+    // 胴
+    p.rect(4, 8, 4, 12, C.white);
+    p.rect(7, 8, 1, 12, C.cream);
+    p.set(4, 8, C.cream);
+    p.set(4, 9, C.white); p.set(3, 10, C.white); p.set(3, 11, C.white); p.set(3, 12, C.cream); // しずく
+    p.set(5, 9, C.yellowLt); // 炎の照り返し
+    // 燭台
+    p.ellipse(6, 20.6, 5.4, 1.8, C.yellow);
+    p.shade(C.yellow, C.yellowLt, C.yellowDk);
+    p.rect(3, 22, 6, 1, C.yellowDk);
+    p.rect(4, 19, 4, 1, C.yellowLt);
+    p.outline();
+    return p;
+  },
+
+  // 絵の具 26x19：木のパレット（親指の穴）に色の点、筆
+  paints() {
+    const p = new Pix(26, 19);
+    p.ellipse(12, 9.4, 11, 7.6, C.crumb);
+    p.ellipse(22, 13, 3.6, 2.8, 0);       // くびれ
+    p.ellipse(6, 12, 1.6, 1.4, 0);        // 親指の穴
+    p.shade(C.crumb, C.white, C.crumbDk, true);
+    // 絵の具（2x2の盛り上がり、左上につや）
+    [[5, 5, C.red, C.redLt], [9, 3, C.yellow, C.yellowLt], [14, 3, C.green, C.greenLt],
+     [18, 5, C.blue, C.blueLt], [19, 9, C.purple, C.purpleLt], [10, 7, C.white, C.white]]
+      .forEach(([x, y, c, l]) => { p.rect(x, y, 2, 2, c); p.set(x, y, l); });
+    p.set(11, 8, C.cream);
+    // 混ぜた跡
+    p.set(13, 11, C.salmon); p.set(14, 11, C.salmon); p.set(14, 12, C.blueLt);
+    // 筆
+    p.line(11, 17, 23, 11, C.brown);
+    p.line(12, 17, 23, 12, C.brown);
+    p.set(23, 11, C.crustDk); p.set(24, 11, C.crustDk);
+    p.line(9, 18, 10, 18, C.silver); p.set(10, 17, C.silver);
+    p.set(8, 18, C.blue);
+    p.outline();
+    return p;
+  },
+
+  // トランプ 22x22：裏向きの1枚（青の模様）と表のハートのA
+  cards() {
+    const p = new Pix(22, 22);
+    // 奥：裏向き
+    p.rect(9, 1, 12, 16, C.white);
+    p.rect(10, 2, 10, 14, C.blue);
+    p.fill((x, y) => p.get(x, y) === C.blue && (x + y) % 2 === 0, C.blueDk);
+    p.fill((x, y) => p.get(x, y) && x >= 10 && x <= 19 && y >= 2 && y <= 15 && (x === 10 || x === 19 || y === 2 || y === 15), C.blueLt);
+    // 手前：ハートのA
+    p.rect(1, 5, 12, 16, C.white);
+    p.rect(12, 6, 1, 15, C.cream);
+    p.rect(2, 20, 11, 1, C.cream);
+    // 枠と重なり境界を輪郭色で分ける
+    for (let y = 5; y <= 17; y++) p.set(13, y, C.outline);
+    // ハート
+    const H = [
+      '.##.##.',
+      '#######',
+      '#######',
+      '.#####.',
+      '..###..',
+      '...#...',
+    ];
+    H.forEach((row, j) => [...row].forEach((ch, i) => { if (ch === '#') p.set(4 + i, 10 + j, C.red); }));
+    p.set(5, 11, C.redLt);
+    // 隅の「A」
+    p.set(3, 7, C.red); p.set(2, 8, C.red); p.set(4, 8, C.red); p.set(3, 8, C.red);
+    p.set(10, 18, C.red); p.set(9, 17, C.red); p.set(11, 17, C.red); p.set(10, 17, C.red);
+    p.outline();
+    return p;
+  },
+
+  // 電球 14x22：明るいガラス玉、フィラメント、銀の口金
+  lightbulb() {
+    const p = new Pix(14, 22);
+    p.ellipse(7, 7, 6, 6.2, C.yellowLt);
+    p.fill((x, y) => y >= 11 && y <= 14 && x >= 4 && x <= 9, C.yellowLt); // 首
+    p.shade(C.yellowLt, C.white, C.yellow);
+    p.set(3, 4, C.white); p.set(4, 3, C.white); p.set(3, 5, C.white); // つや
+    // フィラメント
+    p.line(5, 12, 5, 8, C.yellowDk); p.line(8, 12, 8, 8, C.yellowDk);
+    p.set(5, 7, C.redLt); p.set(6, 6, C.redLt); p.set(7, 7, C.redLt); p.set(8, 6, C.redLt);
+    // 口金（ねじ山）
+    p.rect(4, 15, 6, 5, C.silver);
+    [16, 18].forEach((y) => p.rect(4, y, 6, 1, C.gray));
+    p.set(4, 15, C.white);
+    p.rect(5, 20, 4, 1, C.inkLt);
+    p.set(6, 21, C.ink); p.set(7, 21, C.ink);
+    p.outline();
+    return p;
+  },
 };
 
 export const ITEM_NAMES = Object.keys(ITEMS);
 export const ITEM_LABELS = {
   banana: 'バナナ', mapo: '麻婆豆腐', sugar: '角砂糖', bread: '食パン',
   record: 'レコード', manga: '漫画', radio: 'ラジオ', pen: '万年筆',
+  apple: 'りんご', sushi: '寿司', cake: 'ショートケーキ', coffee: 'コーヒー',
+  umeboshi: '梅干し', watermelon: 'スイカ', chili: '唐辛子', onigiri: 'おにぎり',
+  sheetmusic: '楽譜', musicbox: 'オルゴール', clock: '置き時計', windchime: '風鈴',
+  candle: 'ろうそく', paints: '絵の具', cards: 'トランプ', lightbulb: '電球',
+};
+// 分類（食べ物 / 文化物）。main.js 側で使えるように公開
+export const ITEM_KIND = {
+  banana: 'food', mapo: 'food', sugar: 'food', bread: 'food',
+  record: 'culture', manga: 'culture', radio: 'culture', pen: 'culture',
+  apple: 'food', sushi: 'food', cake: 'food', coffee: 'food',
+  umeboshi: 'food', watermelon: 'food', chili: 'food', onigiri: 'food',
+  sheetmusic: 'culture', musicbox: 'culture', clock: 'culture', windchime: 'culture',
+  candle: 'culture', paints: 'culture', cards: 'culture', lightbulb: 'culture',
 };
 
-export function makeItemPixels(name) {
+export function makeItemPixels(name, opts = {}) {
   const f = ITEMS[name];
   if (!f) throw new Error(`unknown item: ${name}`);
-  const p = f();
+  const p = f(opts || {});
   const mask = new Uint8Array(p.w * p.h);
   let total = 0;
   for (let i = 0; i < mask.length; i++) if (p.d[i]) { mask[i] = 1; total++; }
   return { name, w: p.w, h: p.h, idx: p.d, mask, total };
 }
 
-export function makeItem(name) {
-  const p = makeItemPixels(name);
+// opts.variant … record のラベル色 (0〜7)。他のアイテムでは無視される。
+export function makeItem(name, opts = {}) {
+  const p = makeItemPixels(name, opts);
   return {
     name,
+    variant: opts && opts.variant != null ? opts.variant | 0 : 0,
     w: p.w,
     h: p.h,
     idx: p.idx,

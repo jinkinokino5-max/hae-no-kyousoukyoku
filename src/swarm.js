@@ -31,6 +31,9 @@ export function createSwarm(W, H, opts = {}) {
   let tintR = 22, tintG = 20, tintB = 26;   // 体の色（ほぼ黒、わずかに青み）
   let jitter = 0;                           // 震えの強さ（0=なし, 1=万年筆で細かく震える程度）
   let wingAlpha = 0.35;                     // 羽のきらめきの濃さ
+  let speed = 1;                            // 動きの速さの倍率（コーヒーで速くなる）
+  let spread = 1;                           // 群れの広がりの倍率（梅干しできゅっと縮む）
+  let palette = null;                       // 個体ごとの色（絵の具で色とりどりに）。null なら tint 一色
 
   let count = 0;
   let time = 0;
@@ -82,7 +85,7 @@ export function createSwarm(W, H, opts = {}) {
 
   // 群れの大きさ: 数が増えるほど少しずつ広がる
   function swarmRadius() {
-    return 8 + Math.sqrt(count) * 0.62;
+    return (8 + Math.sqrt(count) * 0.62) * spread;
   }
 
   function step(dt, tx, ty) {
@@ -139,7 +142,7 @@ export function createSwarm(W, H, opts = {}) {
     const ty = target ? target.y : lastTy;
     lastTx = tx; lastTy = ty;
     // 大きな dt でもバネが暴れないよう分割する
-    let rest = Math.min(dt, 0.1);
+    let rest = Math.min(dt, 0.1) * speed;
     while (rest > 1e-6) {
       const h = Math.min(rest, 1 / 30);
       step(h, tx, ty);
@@ -195,12 +198,13 @@ export function createSwarm(W, H, opts = {}) {
     }
 
     // 3) 体: 1ピクセル
+    const pal = palette, pn = pal ? pal.length : 0;
     for (let i = 0; i < count; i++) {
       let xf = px[i] - camX, yf = py[i] - camY;
       if (jAmp > 0) { xf += (rnd() - 0.5) * jAmp; yf += (rnd() - 0.5) * jAmp; }
       const x = xf | 0, y = yf | 0;
       if (x < 0 || y < 0 || x >= W || y >= H) continue;
-      buf[y * W + x] = body;
+      buf[y * W + x] = pn ? pal[wph[i] % pn] : body;
     }
   }
 
@@ -216,6 +220,15 @@ export function createSwarm(W, H, opts = {}) {
   }
   function setJitter(v) { jitter = Math.max(0, +v || 0); }
   function setWing(a) { wingAlpha = Math.max(0, Math.min(1, +a || 0)); }
+  function setSpeed(k) { speed = Math.max(0.2, Math.min(3, +k || 1)); }
+  function setSpread(k) { spread = Math.max(0.3, Math.min(3, +k || 1)); }
+  // setPalette(['#c03030', '#3060c0', ...]) / setPalette(null)
+  function setPalette(list) {
+    palette = list && list.length ? Uint32Array.from(list, (h) => {
+      const v = parseInt(h.replace('#', ''), 16);
+      return (255 << 24 | (v & 255) << 16 | (v >> 8 & 255) << 8 | v >> 16 & 255) >>> 0;
+    }) : null;
+  }
 
   const api = {
     count: 0,
@@ -227,6 +240,9 @@ export function createSwarm(W, H, opts = {}) {
     setTint,
     setJitter,
     setWing,
+    setSpeed,
+    setSpread,
+    setPalette,
     get tint() { return [tintR, tintG, tintB]; },
     get jitter() { return jitter; },
     radius: swarmRadius,

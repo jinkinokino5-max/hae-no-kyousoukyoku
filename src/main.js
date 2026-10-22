@@ -1,11 +1,14 @@
 import { createSwarm } from './swarm.js';
 import { createWingSound } from './wingsound.js';
-import { makeDesk, makeItem, drawItem, bite, ITEM_LABELS } from './pixelart.js';
-import { startRadio, startRecordMusic, startFarewell } from './fx.js';
+import { makeDeskChunk, makeItem, drawItem, bite, ITEM_LABELS } from './pixelart.js';
+import {
+  startRadio, startRecordMusic, startFarewell,
+  playMusicBox, startClock, startWindchime, startScoreFlute,
+} from './fx.js';
+import { SONGS } from './songs.js';
 
 // 低解像度の内部キャンバスに描いて拡大表示する（ファミコン風の粗さを保つ）
-const W = 256, H = 144;             // 画面（ビュー）の大きさ
-const WW = W * 3, WH = H * 3;       // 机全体＝世界の大きさ（オープンワールド: 画面の3×3倍）
+const W = 256, H = 144;             // 画面（ビュー）の大きさ。世界は同じ大きさの区画が上下左右に無限に続く
 const canvas = document.getElementById('screen');
 canvas.width = W;
 canvas.height = H;
@@ -55,62 +58,107 @@ function drawCursor() {
   });
 }
 
-// ---- 試作の数値（開発手順 ver1 の表に対応） ----
+// ---- 数値 ----
 const START_FLIES = 60;
-const TARGET_FLIES = 1000;   // 試作では 1,000匹で終幕（広い世界では「画面の半分」を匹数で代用）
+const TARGET_FLIES = 1200;   // 終幕の匹数（モノが24種に増えたので、試作 ver1 の 1,000 から少し延ばした）
 const BITE_PROB = 0.06;      // 1匹が1フレームにアイテム上でかじる確率
-const GROWTH = { small: 60, mid: 120, large: 200 }; // 食べ切ったときの増加匹数
-// 合計 = 120+200+60+120+120+200+60+60 = 940 ＋ 開始60 = 1000（全部食べると到達）
+const GROWTH = { small: 30, mid: 50, large: 80 }; // 食べ切ったときの増加匹数（約20個で終幕）
 
-const DESK = makeDesk(WW, WH, 7);
-const litter = document.createElement('canvas'); // パンくず・紙片が積もる層（世界座標）
-litter.width = WW; litter.height = WH;
-const lctx = litter.getContext('2d');
+// アイテムの大きさの区分（増加量）と、出やすさ。レコードは曲ごとに楽しめるよう3倍出やすい
+const ITEM_DEF = {
+  banana: 'mid', mapo: 'large', sugar: 'small', bread: 'mid', pen: 'small', radio: 'small', manga: 'large', record: 'mid',
+  apple: 'small', sushi: 'small', cake: 'mid', coffee: 'small', umeboshi: 'small', watermelon: 'large', chili: 'small', onigiri: 'mid',
+  sheetmusic: 'mid', musicbox: 'mid', clock: 'mid', windchime: 'small', candle: 'small', paints: 'mid', cards: 'mid', lightbulb: 'small',
+};
+const WEIGHT = { record: 3 };
+const SPAWN_POOL = Object.keys(ITEM_DEF).flatMap((n) => Array(WEIGHT[n] || 1).fill(n));
 
-// 8アイテム（世界座標の左上）。中央の区画にバナナ、残りは周りの区画に散らす。
-// レコードは一番遠い角に置き、旅の終わり近くで出会うようにする
-const layout = [
-  ['banana', 400, 236, 'mid'],
-  ['mapo',   370,  40, 'large'],
-  ['sugar',  640,  70, 'small'],
-  ['pen',     90, 200, 'small'],
-  ['bread',   60,  50, 'mid'],
-  ['manga',  650, 230, 'large'],
-  ['radio',  360, 360, 'small'],
-  ['record', 690, 370, 'mid'],
-];
-const items = layout.map(([name, x, y, size]) => ({
-  it: makeItem(name), name, x, y, grow: GROWTH[size], awarded: 0, done: false, fired: false,
-}));
+// ---- 無限の机: 画面と同じ大きさの区画を、必要になった所から生成する ----
+// 区画の中身（置かれるモノ）は区画座標から決まる乱数で決めるので、同じ場所には同じモノがある。
+const chunks = new Map(); // "cx,cy" → { cx, cy, desk, litter, items }
+function hash2(x, y) {
+  let h = (Math.imul(x, 374761393) + Math.imul(y, 668265263) + 0x9e3779b9) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return (h ^ (h >>> 16)) >>> 0;
+}
+function rng(seed) { // mulberry32
+  return () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function newItem(name, x, y, variant) {
+  const it = makeItem(name, { variant });
+  return { it, name, variant, x: Math.round(x), y: Math.round(y), grow: GROWTH[ITEM_DEF[name]], awarded: 0, done: false, fired: false };
+}
+function chunkAt(cx, cy) {
+  const key = cx + ',' + cy;
+  let c = chunks.get(key);
+  if (c) return c;
+  c = { cx, cy, desk: null, litter: null, items: [] };
+  const r = rng(hash2(cx, cy));
+  if (cx === 0 && cy === 0) {
+    c.items.push(newItem('banana', W / 2 + 20, H / 2 + 22)); // 最初の区画: すぐ近くにバナナ
+  } else {
+    // 区画を左右2つの枠に分け、それぞれに確率で1つ置く（重ならないように）
+    const n = r() < 0.35 ? 1 : 2;
+    const slots = n === 1 ? [(r() * 2) | 0] : [0, 1];
+    for (const s of slots) {
+      const name = SPAWN_POOL[(r() * SPAWN_POOL.length) | 0];
+      const variant = (r() * SONGS.length) | 0;
+      const o = newItem(name, 0, 0, variant);
+      o.x = cx * W + s * (W / 2) + 8 + Math.round(r() * (W / 2 - 16 - o.it.w));
+      o.y = cy * H + 8 + Math.round(r() * (H - 16 - o.it.h));
+      c.items.push(o);
+    }
+  }
+  chunks.set(key, c);
+  return c;
+}
+function chunkOf(x, y) { return chunkAt(Math.floor(x / W), Math.floor(y / H)); }
 
-const swarm = createSwarm(W, H, { startX: WW / 2, startY: WH / 2 });
+// ---- 群れとカメラ ----
+const swarm = createSwarm(W, H, { startX: W / 2, startY: H / 2 });
 let flies = START_FLIES;
 swarm.setCount(flies);
 
-// ---- カメラ: 群れの中心が画面の端に近づいたときだけ動く（中央付近では群れが静かに留まれる） ----
-const cam = { x: (WW - W) / 2, y: (WH - H) / 2 };
+// カメラ: 群れの中心が画面の端に近づいたときだけ動く（中央付近では群れが静かに留まれる）。世界に端はない
+const cam = { x: 0, y: 0 };
+const centroid = { x: W / 2, y: H / 2 }; // 群れの中心（世界座標）
 const EDGE_X = 72, EDGE_Y = 44;
 function updateCamera(dt) {
   const px = swarm.positions.x, py = swarm.positions.y, n = swarm.count;
   let sx = 0, sy = 0;
   for (let i = 0; i < n; i++) { sx += px[i]; sy += py[i]; }
-  const cx = sx / n - cam.x, cy = sy / n - cam.y; // 群れの中心（画面座標）
+  centroid.x = sx / n; centroid.y = sy / n;
+  const cx = centroid.x - cam.x, cy = centroid.y - cam.y;
   let dx = 0, dy = 0;
   if (cx < EDGE_X) dx = cx - EDGE_X; else if (cx > W - EDGE_X) dx = cx - (W - EDGE_X);
   if (cy < EDGE_Y) dy = cy - EDGE_Y; else if (cy > H - EDGE_Y) dy = cy - (H - EDGE_Y);
   const k = 1 - Math.exp(-3 * dt);
-  cam.x = Math.max(0, Math.min(WW - W, cam.x + dx * k));
-  cam.y = Math.max(0, Math.min(WH - H, cam.y + dy * k));
+  cam.x += dx * k;
+  cam.y += dy * k;
 }
 const target = { x: 0, y: 0 }; // カーソルの世界座標
-function updateTarget() {
-  target.x = Math.max(4, Math.min(WW - 4, cam.x + mouse.x));
-  target.y = Math.max(4, Math.min(WH - 4, cam.y + mouse.y));
+function updateTarget() { target.x = cam.x + mouse.x; target.y = cam.y + mouse.y; }
+
+// 画面の近く（上下左右 1 区画ぶん）のアイテムだけを、食べる判定・描画・ヒントの対象にする
+let nearby = [];
+function collectNearby() {
+  const c0x = Math.floor(cam.x / W), c0y = Math.floor(cam.y / H);
+  nearby = [];
+  for (let cy = c0y - 1; cy <= c0y + 2; cy++)
+    for (let cx = c0x - 1; cx <= c0x + 2; cx++)
+      for (const o of chunkAt(cx, cy).items) if (!o.done) nearby.push(o);
 }
 
 // ---- 音（ブラウザの規則で、最初の操作の後に開始する） ----
 let actx = null, wings = null, wingGain = null, master = null, started = false;
-let radio = null, music = null, farewell = null;
+let radio = null, music = null, musicSong = -1, farewell = null;
+let chord = null; // いま鳴っている和音（楽譜の笛が使う）
+const ambient = {}; // 時計・風鈴・笛など、一度始まると鳴り続ける音
 function startAudio() {
   if (started) return;
   started = true;
@@ -125,81 +173,149 @@ function startAudio() {
   wings.setCount(flies);
 }
 for (const ev of ['pointerdown', 'keydown']) window.addEventListener(ev, startAudio);
+const harmonize = (glide) => (pcs) => { chord = pcs; wings.setHarmony(pcs, glide); };
 
-// ---- 粒子（パンくず・紙片）。落ちたら litter 層に残る。座標は世界座標 ----
+// ---- 粒子（パンくず・紙片・種・米粒・トランプ）。落ちたら区画の litter 層に残る。座標は世界座標 ----
+const PARTICLE = {
+  crumb: { g: 90, life: 0.5, s: 1, vx: 22, vy: 10, colors: ['#e0b060', '#c08a3c'] },
+  rice: { g: 90, life: 0.45, s: 1, vx: 20, vy: 10, colors: ['#f8f4e8', '#e8e0cc'] },
+  seed: { g: 100, life: 0.45, s: 1, vx: 26, vy: 12, colors: ['#1a1410', '#2a2018'] },
+  paper: { g: 10, life: 2.2, s: 2, vx: 24, vy: 18, colors: ['#f0e8d0', '#d8c8a0'], drift: true },
+  card: { g: 12, life: 2.4, s: 2, vx: 28, vy: 20, colors: ['#f8f4ec', '#f8f4ec', '#c02828'], drift: true },
+};
+const BITE_PARTICLE = { bread: 'crumb', onigiri: 'rice', watermelon: 'seed', manga: 'paper', cards: 'card' };
 const parts = [];
 function spawn(x, y, kind) {
   if (parts.length > 400) return;
-  if (kind === 'crumb') {
-    parts.push({ x, y, vx: (Math.random() - 0.5) * 22, vy: -8 - Math.random() * 10, g: 90, life: 0.45 + Math.random() * 0.2, kind, c: Math.random() < 0.5 ? '#e0b060' : '#c08a3c', s: 1 });
-  } else {
-    parts.push({ x, y, vx: (Math.random() - 0.5) * 24, vy: -14 - Math.random() * 16, g: 10, life: 1.6 + Math.random() * 1.2, kind, c: Math.random() < 0.5 ? '#f0e8d0' : '#d8c8a0', s: 2, ph: Math.random() * 6 });
-  }
+  const k = PARTICLE[kind];
+  parts.push({
+    x, y, k, vx: (Math.random() - 0.5) * k.vx, vy: -k.vy * (0.6 + Math.random() * 0.8),
+    life: k.life * (0.8 + Math.random() * 0.5), ph: Math.random() * 6,
+    c: k.colors[(Math.random() * k.colors.length) | 0],
+  });
 }
 function updateParts(dt) {
   for (let i = parts.length - 1; i >= 0; i--) {
     const p = parts[i];
     p.life -= dt;
-    p.vy += p.g * dt;
-    p.x += p.vx * dt + (p.kind === 'paper' ? Math.sin((p.ph += dt * 5)) * 10 * dt : 0);
+    p.vy += p.k.g * dt;
+    p.x += p.vx * dt + (p.k.drift ? Math.sin((p.ph += dt * 5)) * 10 * dt : 0);
     p.y += p.vy * dt;
-    if (p.kind === 'paper') p.vy *= 0.97;
+    if (p.k.drift) p.vy *= 0.97;
     if (p.life <= 0) {
-      lctx.fillStyle = p.c;
-      lctx.fillRect(Math.round(p.x), Math.round(p.y), p.s, p.s);
+      const c = chunkOf(p.x, p.y);
+      if (!c.litter) { c.litter = document.createElement('canvas'); c.litter.width = W; c.litter.height = H; }
+      const l = c.litter.getContext('2d');
+      l.fillStyle = p.c;
+      l.fillRect(Math.round(p.x) - c.cx * W, Math.round(p.y) - c.cy * H, p.k.s, p.k.s);
       parts[i] = parts[parts.length - 1];
       parts.pop();
     }
   }
 }
 function drawParts(cx, cy) {
-  for (const p of parts) { ctx.fillStyle = p.c; ctx.fillRect(Math.round(p.x) - cx, Math.round(p.y) - cy, p.s, p.s); }
+  for (const p of parts) { ctx.fillStyle = p.c; ctx.fillRect(Math.round(p.x) - cx, Math.round(p.y) - cy, p.k.s, p.k.s); }
 }
 
-// ---- 食べ始めたときのアクション（Step 5・6） ----
-const eaten = []; // 食べた順（終幕後の一覧用）
-const SOUND_ACTIONS = new Set(['sugar', 'radio', 'record']);
-function fireAction(name) {
-  switch (name) {
-    case 'mapo': swarm.setTint('#8c1c14'); break;                 // 見た目: ハエが赤く染まる
-    case 'pen': swarm.setJitter(1); break;                        // 見た目: 細かく震える
-    case 'sugar': if (!music) wings.setPitchShift(2); break;      // 音: 羽音の音程が上がる（曲が鳴っている間は和音を優先）
-    case 'radio': if (!radio && !music) radio = startRadio(actx, master); break; // 音: ノイズ混じりの音声
-    case 'record':                                                 // 音楽: 曲が流れ、羽音がその和音へ溶けていく
-      if (music) break;
-      if (radio) { radio.stop(1.5); radio = null; }               // 音楽の出どころは1つにする
-      wings.setPitchShift(0);
-      music = startRecordMusic(actx, master, { onChord: (pcs) => wings.setHarmony(pcs, 2.0) });
-      break;
-    default: break; // banana: 基準 / bread・manga は食べている間の粒子で表現
+// ---- 光（ろうそく・電球） ----
+let dark = 0, darkTarget = 0, warm = 0, warmTarget = 0;
+function drawLight(cx, cy, dt) {
+  dark += (darkTarget - dark) * (1 - Math.exp(-0.8 * dt));
+  warm += (warmTarget - warm) * (1 - Math.exp(-0.8 * dt));
+  if (dark > 0.01) {
+    // ろうそく: 部屋が暗くなり、群れのまわりだけがゆらめく暖かい光に照らされる
+    const sx = centroid.x - cx, sy = centroid.y - cy;
+    const flick = 1 + Math.sin(performance.now() * 0.011) * 0.04 + Math.sin(performance.now() * 0.023) * 0.03;
+    const g = ctx.createRadialGradient(sx, sy, 8, sx, sy, 90 * flick);
+    g.addColorStop(0, 'rgba(255,170,80,0)');
+    g.addColorStop(0.4, `rgba(30,12,8,${0.35 * dark})`);
+    g.addColorStop(1, `rgba(8,4,10,${0.78 * dark})`);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+  }
+  if (warm > 0.01) {
+    ctx.fillStyle = `rgba(255,224,160,${0.10 * warm})`; // 電球: 机全体が少し明るく暖かい色に
+    ctx.fillRect(0, 0, W, H);
   }
 }
-const firedLate = new Set(); // 音が未開始のときに発動を待つ「音」のアクション
+
+// ---- 食べ始めたときのアクション ----
+const eaten = []; // 食べた順（終幕後の一覧用）
+const heard = []; // 流れたレコードの曲名
+const SOUND_ACTIONS = new Set(['sugar', 'chili', 'radio', 'record', 'sheetmusic', 'musicbox', 'clock', 'windchime']);
+function fireAction(o) {
+  switch (o.name) {
+    // 見た目
+    case 'mapo': swarm.setPalette(null); swarm.setTint('#8c1c14'); break;        // ハエが赤く染まる
+    case 'sushi': swarm.setPalette(null); swarm.setTint('#7a8494'); swarm.setWing(0.6); break; // 銀色に光る
+    case 'paints': swarm.setPalette(['#c03030', '#2f5fb8', '#e0b020', '#2e8a4a', '#8a3aa8', '#e07020']); break; // 色とりどり
+    case 'pen': swarm.setJitter(1); break;                                        // 細かく震える
+    case 'cake': swarm.setWing(0.9); break;                                       // 羽のきらめきが強まる
+    case 'coffee': swarm.setSpeed(1.6); break;                                    // 群れがせわしなく速くなる
+    case 'umeboshi': swarm.setSpread(0.6); break;                                 // 群れがきゅっと縮まる
+    case 'candle': darkTarget = 1; warmTarget = 0; break;                         // 部屋が暗くなり、ろうそくの光
+    case 'lightbulb': darkTarget = 0; warmTarget = 1; break;                      // 明るく暖かくなる
+    // 音
+    case 'sugar': if (!music) wings.setPitchShift(2); break;                      // 羽音が少し高く
+    case 'chili': if (!music) wings.setPitchShift(-3); break;                     // 羽音が低く太く
+    case 'radio': if (!radio && !music) radio = startRadio(actx, master); break; // ノイズ混じりの音声
+    case 'clock': if (!ambient.clock) ambient.clock = startClock(actx, master); break;
+    case 'windchime': if (!ambient.chime) ambient.chime = startWindchime(actx, master); break;
+    case 'musicbox': playMusicBox(actx, master); break;                           // 毎回一度だけ鳴る
+    case 'sheetmusic': if (!ambient.flute) ambient.flute = startScoreFlute(actx, master, () => chord); break; // 笛が加わる
+    // 音楽: レコードごとに違う曲。羽音がその和音へ溶けていく
+    case 'record':
+      if (music && musicSong === o.variant) break;
+      if (music) music.stop(2.0);
+      if (radio) { radio.stop(1.5); radio = null; }                               // 音楽の出どころは1つにする
+      wings.setPitchShift(0);
+      music = startRecordMusic(actx, master, { song: SONGS[o.variant], onChord: harmonize(2.0) });
+      musicSong = o.variant;
+      heard.push(SONGS[o.variant].title);
+      showCaption('♪ ' + SONGS[o.variant].title);
+      break;
+    default: break; // banana・apple: 基準 / bread・onigiri・watermelon・manga・cards は食べている間の粒子で表現
+  }
+}
+const firedLate = []; // 音が未開始のときに発動を待つ「音」のアクション
+
+// 曲名などを画面下にしばらく表示する（文字は HTML で重ねる。低解像度キャンバスだと潰れるため）
+const ui = {
+  debug: document.getElementById('debug'), hint: document.getElementById('hint'),
+  caption: document.getElementById('caption'), list: document.getElementById('list'),
+};
+let captionTimer = 0;
+function showCaption(s) {
+  ui.caption.textContent = s;
+  ui.caption.style.opacity = 1;
+  clearTimeout(captionTimer);
+  captionTimer = setTimeout(() => { ui.caption.style.opacity = 0; }, 5000);
+}
 
 function eatFrame() {
   const px = swarm.positions.x, py = swarm.positions.y;
   const n = swarm.count;
   for (let i = 0; i < n; i++) {
     const x = px[i] | 0, y = py[i] | 0;
-    for (const o of items) {
+    for (const o of nearby) {
       if (o.done) continue;
       const lx = x - o.x, ly = y - o.y;
       if (lx < 0 || ly < 0 || lx >= o.it.w || ly >= o.it.h) continue;
       if (!o.it.mask[ly * o.it.w + lx] || Math.random() > BITE_PROB) continue;
       bite(o.it, lx, ly, 1.5);
-      if (o.name === 'bread') spawn(x, y, 'crumb');
-      if (o.name === 'manga') spawn(x, y, 'paper');
+      const pk = BITE_PARTICLE[o.name];
+      if (pk) spawn(x, y, pk);
       break;
     }
   }
   // 進捗 → ハエの増加、アクション発動
-  for (const o of items) {
+  for (const o of nearby) {
     if (o.done) continue;
     const frac = 1 - o.it.remaining / o.it.total;
     if (!o.fired && frac >= 0.2) {
       o.fired = true;
       eaten.push(o.name);
-      if (actx || !SOUND_ACTIONS.has(o.name)) fireAction(o.name); else firedLate.add(o.name);
+      if (actx || !SOUND_ACTIONS.has(o.name)) fireAction(o); else firedLate.push(o);
     }
     if (frac >= 0.92) { // 取り残しの数ピクセルは食べ切ったことにする
       bite(o.it, o.it.w / 2, o.it.h / 2, Math.max(o.it.w, o.it.h));
@@ -213,21 +329,20 @@ function eatFrame() {
 
 // ---- 画面外のアイテムの方向を、画面の縁にかすかな点で示す（広い机で迷わないため） ----
 function drawHints(cx, cy) {
-  for (const o of items) {
-    if (o.done) continue;
+  for (const o of nearby) {
     const ix = o.x + o.it.w / 2 - cx, iy = o.y + o.it.h / 2 - cy;
     if (ix >= 0 && ix < W && iy >= 0 && iy < H) continue;
     const dx = ix - W / 2, dy = iy - H / 2;
     const s = Math.min((W / 2 - 3) / Math.abs(dx || 1e-6), (H / 2 - 3) / Math.abs(dy || 1e-6));
     const hx = Math.round(W / 2 + dx * s), hy = Math.round(H / 2 + dy * s);
-    ctx.fillStyle = 'rgba(255,236,200,0.45)';
+    ctx.fillStyle = o.name === 'record' ? 'rgba(255,200,200,0.55)' : 'rgba(255,236,200,0.45)';
     ctx.fillRect(hx - 1, hy - 1, 2, 2);
   }
 }
 
-// ---- 終幕（Step 7）: 1,000匹 → 「蛍の光」→ 幕が閉じる → 食べたもの一覧 ----
+// ---- 終幕: TARGET_FLIES → 「蛍の光」→ 幕が閉じる → 食べたもの一覧 ----
 let state = 'play';           // 'play' → 'ending' → 'closed'
-let endT = 0, curtainSec = 40, closedT = 0, playStart = performance.now(), playSec = 0;
+let endT = 0, curtainSec = 40, playStart = performance.now(), playSec = 0;
 function startEnding() {
   state = 'ending';
   endT = 0;
@@ -235,9 +350,10 @@ function startEnding() {
   if (actx) {
     if (radio) { radio.stop(3); radio = null; }
     if (music) { music.stop(2.5); music = null; }
+    for (const k of Object.keys(ambient)) { ambient[k].stop(); delete ambient[k]; }
     wings.setPitchShift(0);
     farewell = startFarewell(actx, master, {
-      onChord: (pcs) => wings.setHarmony(pcs, 1.5), // 羽音が別れの曲の和音を奏でる
+      onChord: harmonize(1.5), // 羽音が別れの曲の和音を奏でる
       onEnd: () => {
         // 曲が終わったら、羽音もゆっくり消えていく
         wingGain.gain.setTargetAtTime(0, actx.currentTime, 2.5);
@@ -278,25 +394,19 @@ function drawCurtain(p, t) {
   ctx.fillRect(0, vy + 8, W, 1);
 }
 
-function drawList(alpha) {
-  ctx.save();
-  ctx.globalAlpha = alpha;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'top';
-  const shadowText = (s, x, y, color) => {
-    ctx.fillStyle = 'rgba(20,4,8,0.9)'; ctx.fillText(s, x + 1, y + 1);
-    ctx.fillStyle = color; ctx.fillText(s, x, y);
-  };
-  ctx.font = '10px sans-serif';
-  shadowText('たべたもの', W / 2, 22, '#f0d890');
-  ctx.font = '8px sans-serif';
-  eaten.forEach((name, i) => {
-    const col = i % 2, row = (i / 2) | 0;
-    shadowText(ITEM_LABELS[name], W / 2 + (col ? 40 : -40), 42 + row * 13, '#f4e8d0');
-  });
+// 幕が閉じたら、食べたもの一覧を出す。同じものはまとめて「×n」、食べた順に3列
+function showList() {
+  const counts = new Map();
+  for (const n of eaten) counts.set(n, (counts.get(n) || 0) + 1);
+  const ul = ui.list.querySelector('ul');
+  ul.replaceChildren(...[...counts].map(([name, k]) => {
+    const li = document.createElement('li');
+    li.textContent = ITEM_LABELS[name] + (k > 1 ? ` ×${k}` : '');
+    return li;
+  }));
   const m = Math.floor(playSec / 60), s = Math.floor(playSec % 60);
-  shadowText(`ハエ ${swarm.count}匹 ・ ${m}分${s}秒`, W / 2, H - 24, '#d8b878');
-  ctx.restore();
+  ui.list.querySelector('p').textContent = `ハエ ${swarm.count}匹 ・ ${m}分${s}秒 ・ 聴いたレコード ${new Set(heard).size}枚`;
+  ui.list.style.opacity = 1;
 }
 
 // ---- テスト用キー（本番では外す） ----
@@ -307,13 +417,33 @@ window.addEventListener('keydown', (e) => {
   else if ((e.key === 'n' || e.key === 'N') && state === 'play') flies = Math.min(flies + 100, TARGET_FLIES);
 });
 
-let msAvg = 0;
+let msAvg = 0, debugText = '';
 function drawDebug(fps) {
-  ctx.fillStyle = 'rgba(255,240,210,0.85)';
-  ctx.font = '8px monospace';
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'top';
-  ctx.fillText(`${swarm.count}/${TARGET_FLIES} flies  ${msAvg.toFixed(2)}ms  ${fps}fps`, 2, 2);
+  const t = debug && state === 'play'
+    ? `${swarm.count}/${TARGET_FLIES}匹　${msAvg.toFixed(2)}ms　${fps}fps　区画(${Math.floor(cam.x / W)}, ${Math.floor(cam.y / H)})` : '';
+  if (t !== debugText) ui.debug.textContent = debugText = t;
+}
+
+// 区画の机を描く。見えている区画の机の絵が未生成ならここで作る
+function drawDesk(cx, cy) {
+  const c0x = Math.floor(cx / W), c0y = Math.floor(cy / H);
+  for (let y = c0y; y <= c0y + 1; y++)
+    for (let x = c0x; x <= c0x + 1; x++) {
+      const c = chunkAt(x, y);
+      if (!c.desk) c.desk = makeDeskChunk(x, y, W, H, 7);
+      const sx = x * W - cx, sy = y * H - cy;
+      ctx.drawImage(c.desk, sx, sy);
+      if (c.litter) ctx.drawImage(c.litter, sx, sy);
+    }
+}
+// 次に見えそうな区画の机を、1フレームに1枚まで先に作っておく（移動中のカクつきを減らす）
+function pregenerate(cx, cy) {
+  const c0x = Math.floor(cx / W), c0y = Math.floor(cy / H);
+  for (let y = c0y - 1; y <= c0y + 2; y++)
+    for (let x = c0x - 1; x <= c0x + 2; x++) {
+      const c = chunkAt(x, y);
+      if (!c.desk) { c.desk = makeDeskChunk(x, y, W, H, 7); return; }
+    }
 }
 
 let last = performance.now();
@@ -323,11 +453,12 @@ function frame(now) {
   last = now;
 
   // 音が始まる前に発動条件を満たしていた「音」のアクションを遅れて発動
-  if (actx && firedLate.size) { for (const n of firedLate) fireAction(n); firedLate.clear(); }
+  if (actx && firedLate.length) { for (const o of firedLate.splice(0)) fireAction(o); }
 
   const t0 = performance.now();
   updateTarget();
   swarm.update(dt, target);
+  collectNearby();
   if (state === 'play') {
     eatFrame();
     if (flies >= TARGET_FLIES) startEnding();
@@ -337,16 +468,16 @@ function frame(now) {
   updateParts(dt);
 
   const cx = Math.round(cam.x), cy = Math.round(cam.y);
-  ctx.drawImage(DESK, cx, cy, W, H, 0, 0, W, H);
-  ctx.drawImage(litter, cx, cy, W, H, 0, 0, W, H);
-  for (const o of items) {
-    if (o.done) continue;
+  drawDesk(cx, cy);
+  for (const o of nearby) {
     if (o.x + o.it.w + 4 < cx || o.x - 4 > cx + W || o.y + o.it.h + 4 < cy || o.y - 4 > cy + H) continue;
     drawItem(ctx, o.it, o.x - cx, o.y - cy);
   }
   drawParts(cx, cy);
   swarm.draw(ctx, cx, cy);
+  drawLight(cx, cy, dt);
   msAvg = msAvg * 0.95 + (performance.now() - t0) * 0.05;
+  pregenerate(cx, cy);
 
   if (state === 'play') {
     drawHints(cx, cy);
@@ -356,25 +487,18 @@ function frame(now) {
     const p = lin * lin * (3 - 2 * lin); // ゆっくり動き出し、ゆっくり止まる
     drawCurtain(p, endT);
     if (lin >= 1) {
-      if (state === 'ending') { state = 'closed'; closedT = endT; }
-      drawList(Math.min(1, (endT - closedT) / 3));
+      if (state === 'ending') { state = 'closed'; showList(); }
     }
   }
 
   fpsCount++; fpsTime += dt;
   if (fpsTime >= 0.5) { fps = Math.round(fpsCount / fpsTime); fpsCount = 0; fpsTime = 0; }
-  if (debug && state === 'play') drawDebug(fps);
-  if (!locked()) {
-    ctx.fillStyle = 'rgba(255,240,210,0.85)';
-    ctx.font = '8px sans-serif';
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'top';
-    ctx.fillText('クリックでカーソルを固定（Escで解除）', W - 3, H - 10);
-  }
+  drawDebug(fps);
+  ui.hint.style.display = locked() || state !== 'play' ? 'none' : '';
   drawCursor();
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
 
 // 検証用に公開（コンソールから状態を見る）
-window.__game = { items, swarm, eaten, cam, ITEM_LABELS, get state() { return state; }, get wings() { return wings; } };
+window.__game = { chunks, swarm, eaten, heard, cam, fire: (name, variant = 0) => fireAction({ name, variant }), get nearby() { return nearby; }, get state() { return state; }, get wings() { return wings; } };

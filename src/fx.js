@@ -1,4 +1,5 @@
 // 食べ物・文化物が引き起こす「音」のアクションと、終幕の曲。すべて Web Audio で合成する（外部素材なし）。
+import { SONGS, parseMelody, parseChords } from './songs.js';
 
 const hz = (m) => 440 * Math.pow(2, (m - 69) / 12);
 
@@ -102,9 +103,9 @@ function scheduleChord(ctx, at, pcs, onChord, timers) {
 }
 
 // ---- レコード（Step 6） ----
-// 針を落とす → パチパチ音 → こもった音がゆっくり開いて曲が立ち上がる。曲はループする。
+// 針を落とす → パチパチ音 → こもった音がゆっくり開いて曲が立ち上がる。曲（songs.js の1曲）はループする。
 // onChord(pcs) で、いま鳴っている和音（G=0 とした半音の音名）を知らせる。羽音の基本音 196Hz が G なので。
-export function startRecordMusic(ctx, dest, { onChord } = {}) {
+export function startRecordMusic(ctx, dest, { onChord, song = SONGS[SONGS.length - 1] } = {}) {
   const out = ctx.createGain();
   out.gain.value = 0;
   const tone = ctx.createBiquadFilter(); tone.type = 'lowpass'; tone.frequency.value = 350; tone.Q.value = 0.5;
@@ -130,34 +131,50 @@ export function startRecordMusic(ctx, dest, { onChord } = {}) {
   crackle.start(now);
 
   const note = makePlayer(ctx, out);
-  // [MIDIノート, 長さ(拍)] Dm のゆったりした3拍子（オリジナルの短い旋律）
-  const melody = [
-    [74, 1.5], [72, 0.5], [70, 1], [69, 3],
-    [70, 1.5], [69, 0.5], [67, 1], [65, 3],
-    [67, 1.5], [69, 0.5], [70, 1], [72, 1], [70, 1], [69, 1],
-    [67, 2], [65, 1], [62, 3],
-  ];
-  // 1小節(3拍)ごとの和音: [ルートのMIDI, 構成音のMIDIの並び]
-  const D = [50, 57, 62, 65], Bb = [46, 53, 58, 62], A = [45, 52, 57, 61], Gm = [43, 50, 55, 58], F = [41, 48, 53, 57];
-  const bars = [D, D, Bb, A, Bb, Gm, F, D];
-  const beat = 0.78; // 秒
+  const melody = parseMelody(song.melody);
+  const bars = parseChords(song.chords);
+  const beat = song.beat, meter = song.meter, pickup = song.pickup || 0;
+  const loopLen = bars.length * meter * beat;
+  const vol = song.vol ?? 1;
   const timers = [];
   let alive = true, t0 = now + 3.0;
+
+  // 伴奏の刻み方（曲ごと）。part: 小節を和音の数で割った1区間
+  function accompany(c, st, len) {
+    const k = len / beat; // この区間の拍数
+    const L = (m, t, d, g) => note(m, t, d, g * vol);
+    switch (song.arp) {
+      case 'waltz': // 1拍目に低音、残りの拍に和音を薄く
+        L(c.bass, st, len * 1.2, 0.10);
+        for (let i = 1; i < k; i++) { L(c.tones[1], st + i * beat, beat * 1.5, 0.032); L(c.tones[2], st + i * beat, beat * 1.5, 0.028); }
+        break;
+      case 'bass': // 1拍目に低音、各拍で構成音を1つずつ
+        L(c.bass, st, len * 1.1, 0.09);
+        for (let i = 1; i < k; i++) L(c.tones[i % c.tones.length], st + i * beat, beat * 1.4, 0.035);
+        break;
+      case 'flow': // 8分音符で低音→構成音を流す（カノン）
+        L(c.bass, st, len * 1.2, 0.09);
+        for (let i = 0; i < k * 2; i++) L(c.tones[i % c.tones.length] + (i >= c.tones.length ? 12 : 0), st + i * beat / 2, beat, 0.028);
+        break;
+      case 'none': // 低音の分散和音だけ（エリーゼ: 根音・5度・オクターブ）
+        L(c.bass, st, beat * 3, 0.07); L(c.bass + 7, st + beat, beat * 3, 0.05); L(c.bass + 12, st + 2 * beat, beat * 3, 0.05);
+        break;
+    }
+  }
 
   function schedule() {
     if (!alive) return;
     let t = t0;
-    for (const [m, b] of melody) { note(m, t, b * beat * 1.6, 0.13); t += b * beat; }
-    bars.forEach((ch, i) => {
-      const bt = t0 + i * 3 * beat;
-      note(ch[0], bt, 3 * beat * 1.2, 0.10);                       // 低音
-      note(ch[2], bt + beat, beat * 1.5, 0.035);                   // 2・3拍目の和音を薄く
-      note(ch[3], bt + beat, beat * 1.5, 0.03);
-      note(ch[2], bt + 2 * beat, beat * 1.5, 0.03);
-      note(ch[3], bt + 2 * beat, beat * 1.5, 0.025);
-      scheduleChord(ctx, bt, ch.map((m) => (m - 55)), onChord, timers);
+    for (const [m, b] of melody) { if (m !== null) note(m, t, b * beat * 1.6 + 0.15, 0.13 * vol); t += b * beat; }
+    bars.forEach((parts, i) => {
+      const len = meter * beat / parts.length;
+      parts.forEach((c, j) => {
+        const st = t0 + pickup * beat + i * meter * beat + j * len;
+        accompany(c, st, len);
+        scheduleChord(ctx, st, c.tones.map((m) => m - 55), onChord, timers);
+      });
     });
-    t0 = t;
+    t0 += loopLen;
     // 次の周回を、今回が終わる少し前に予約する（ループ）
     timers.push(setTimeout(schedule, Math.max(500, (t0 - ctx.currentTime - 2) * 1000)));
   }
@@ -241,4 +258,114 @@ export function startFarewell(ctx, dest, { onChord, onEnd } = {}) {
     duration: end - ctx.currentTime,
     stop() { timers.forEach(clearTimeout); out.gain.setTargetAtTime(0, ctx.currentTime, 0.5); },
   };
+}
+
+// ---- 新アイテムの音 ----
+
+// オルゴール: きらきら星（フランス民謡、パブリックドメイン）を高い音で一度だけ。少しずつゆっくりになって止まる（ぜんまいが切れる）
+export function playMusicBox(ctx, dest) {
+  const out = ctx.createGain(); out.gain.value = 0.5;
+  out.connect(makeRoom(ctx, dest, 0.5));
+  const notes = parseMelody(
+    'C6:1 C6:1 G6:1 G6:1 A6:1 A6:1 G6:2 F6:1 F6:1 E6:1 E6:1 D6:1 D6:1 C6:2 ' +
+    'G6:1 G6:1 F6:1 F6:1 E6:1 E6:1 D6:2 G6:1 G6:1 F6:1 F6:1 E6:1 E6:1 D6:2');
+  let t = ctx.currentTime + 0.2, beat = 0.32;
+  for (const [m] of notes) {
+    // オルゴールの音色: 高いサイン波＋金属的な倍音、すぐ減衰
+    for (const [mul, amp] of [[1, 0.09], [4.2, 0.02]]) {
+      const o = ctx.createOscillator(); o.frequency.value = hz(m) * mul;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(amp, t + 0.005);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 1.4);
+      o.connect(g); g.connect(out); o.start(t); o.stop(t + 1.5);
+    }
+    t += beat;
+    beat *= 1.012; // ぜんまいがゆるんでいく
+  }
+}
+
+// 置き時計: チク・タクを鳴らし続ける（静かに）
+export function startClock(ctx, dest) {
+  const out = ctx.createGain(); out.gain.value = 0.22; out.connect(dest);
+  const click = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.03), ctx.sampleRate);
+  const d = click.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (ctx.sampleRate * 0.003));
+  let alive = true, n = 0, next = ctx.currentTime + 0.1;
+  const bp = [ctx.createBiquadFilter(), ctx.createBiquadFilter()];
+  bp[0].type = bp[1].type = 'bandpass'; bp[0].frequency.value = 3200; bp[1].frequency.value = 2300;
+  bp[0].Q.value = bp[1].Q.value = 8;
+  bp.forEach((f) => f.connect(out));
+  function tick() {
+    if (!alive) return;
+    while (next < ctx.currentTime + 1.2) {
+      const s = ctx.createBufferSource(); s.buffer = click;
+      s.connect(bp[n++ & 1]); s.start(next);
+      next += 0.5;
+    }
+    setTimeout(tick, 500);
+  }
+  tick();
+  return { stop() { alive = false; out.gain.setTargetAtTime(0, ctx.currentTime, 0.3); } };
+}
+
+// 風鈴: 数秒〜十数秒おきに、ちりん（金属の不協和な倍音をもつ高い音）
+export function startWindchime(ctx, dest) {
+  const out = ctx.createGain(); out.gain.value = 0.5;
+  out.connect(makeRoom(ctx, dest, 0.6));
+  let alive = true;
+  const base = [88, 91, 93, 95]; // E6 G6 A6 B6
+  function ring() {
+    if (!alive) return;
+    const t = ctx.currentTime;
+    const hits = 1 + ((Math.random() * 3) | 0);
+    for (let h = 0; h < hits; h++) {
+      const m = base[(Math.random() * base.length) | 0], st = t + h * (0.08 + Math.random() * 0.15);
+      for (const [mul, amp, dec] of [[1, 0.06, 2.6], [2.76, 0.025, 1.2], [5.4, 0.012, 0.6]]) {
+        const o = ctx.createOscillator(); o.frequency.value = hz(m) * mul;
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0, st); g.gain.linearRampToValueAtTime(amp, st + 0.003);
+        g.gain.exponentialRampToValueAtTime(0.0001, st + dec);
+        o.connect(g); g.connect(out); o.start(st); o.stop(st + dec + 0.1);
+      }
+    }
+    setTimeout(ring, 3000 + Math.random() * 9000);
+  }
+  setTimeout(ring, 300);
+  return { stop() { alive = false; } };
+}
+
+// 楽譜: 羽音のざわめきの上に、やわらかい笛が1つ加わる（案B の試作）。
+// getChord() が返す和音（G=0 の音名）から音を選び、間をあけてゆっくり歌う。和音がなければペンタトニック
+export function startScoreFlute(ctx, dest, getChord) {
+  const out = ctx.createGain(); out.gain.value = 0.5;
+  out.connect(makeRoom(ctx, dest, 0.5));
+  let alive = true, prev = 67 + 12;
+  function phrase() {
+    if (!alive) return;
+    const pcs = getChord() || [0, 2, 4, 7, 9];
+    let t = ctx.currentTime + 0.1;
+    const len = 3 + ((Math.random() * 4) | 0);
+    for (let i = 0; i < len; i++) {
+      // 前の音から近い和音の音へ（なめらかな旋律にする）
+      const cands = [];
+      for (let m = 72; m <= 88; m++) if (pcs.includes(((m - 55) % 12 + 12) % 12)) cands.push(m);
+      cands.sort((a, b) => Math.abs(a - prev) - Math.abs(b - prev));
+      const m = cands[Math.min(cands.length - 1, (Math.random() * 3) | 0)];
+      prev = m;
+      const dur = [0.6, 0.9, 1.2][(Math.random() * 3) | 0];
+      const o = ctx.createOscillator(); o.type = 'sine'; o.frequency.value = hz(m);
+      const vib = ctx.createOscillator(); vib.frequency.value = 4.8;
+      const va = ctx.createGain(); va.gain.value = hz(m) * 0.006;
+      vib.connect(va); va.connect(o.frequency);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.07, t + 0.12);
+      g.gain.setTargetAtTime(0, t + dur * 0.8, 0.15);
+      o.connect(g); g.connect(out);
+      o.start(t); vib.start(t); o.stop(t + dur + 0.8); vib.stop(t + dur + 0.8);
+      t += dur;
+    }
+    setTimeout(phrase, (t - ctx.currentTime + 2 + Math.random() * 4) * 1000);
+  }
+  setTimeout(phrase, 800);
+  return { stop() { alive = false; } };
 }
