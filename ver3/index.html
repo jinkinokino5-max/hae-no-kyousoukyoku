@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ハエの協奏曲 ver3</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DotGothic16&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; image-rendering: pixelated; cursor: none; }
+  /* 文字は低解像度キャンバスに描くと潰れるため、画面の解像度のまま HTML で重ねる */
+  #ui {
+    position: fixed; inset: 0; pointer-events: none;
+    font-family: 'DotGothic16', 'BIZ UDPGothic', 'Yu Gothic', 'Hiragino Kaku Gothic ProN', 'Meiryo', sans-serif;
+    color: #fff4e0; text-shadow: 0 0 2px #1a0c06, 1px 1px 0 #1a0c06, -1px -1px 0 #1a0c06, 1px -1px 0 #1a0c06, -1px 1px 0 #1a0c06;
+  }
+  #debug { position: absolute; left: 12px; top: 10px; font-size: 15px; opacity: 0.85; }
+  #hint { position: absolute; right: 14px; bottom: 12px; font-size: 16px; opacity: 0.9; }
+  #caption {
+    position: absolute; left: 0; right: 0; bottom: 9vh; text-align: center; font-size: clamp(16px, 2.6vw, 26px);
+    opacity: 0; transition: opacity 1.5s;
+  }
+  #list {
+    position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    opacity: 0; transition: opacity 3s; color: #f4e8d0; gap: 2.2vh;
+  }
+  #list h1 { margin: 0; font-weight: normal; font-size: clamp(22px, 3.6vw, 40px); color: #f0d890; letter-spacing: 0.3em; }
+  #list ul {
+    list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(8em, auto));
+    gap: 0.5em 2.5em; font-size: clamp(14px, 2vw, 22px);
+  }
+  #list p { margin: 0; font-size: clamp(13px, 1.7vw, 19px); color: #d8b878; }
+  /* エンドロール: 下から上へ流れる。幕の赤い部分に重なっても読めるよう、縁取りを強める */
+  #credits {
+    position: absolute; left: 0; right: 0; top: 0; opacity: 0; text-align: center; color: #fff4e0;
+    will-change: transform; line-height: 2.3; font-size: clamp(16px, 2.4vw, 26px);
+    text-shadow: 0 0 6px #000, 0 0 3px #000, 2px 2px 0 #1a0c06, -2px -2px 0 #1a0c06, 2px -2px 0 #1a0c06, -2px 2px 0 #1a0c06;
+  }
+  #credits .cr-title { font-size: clamp(34px, 6vw, 72px); line-height: 1.5; margin: 0.4em 0; letter-spacing: 0.2em; color: #f0d890; }
+  #credits .cr-h2 { font-size: clamp(20px, 3.2vw, 36px); margin-top: 1em; letter-spacing: 0.3em; color: #f0d890; }
+  #credits .cr-p { padding: 0 6vw; }
+  #credits .cr-blank { height: 1.2em; }
+  #credits .cr-gap { height: 36vh; }
+  #credits .cr-item { display: flex; align-items: center; justify-content: center; gap: 0.7em; }
+  #credits .cr-item img { height: 24px; width: auto; image-rendering: pixelated; filter: drop-shadow(1px 1px 0 #1a0c06); }
+  /* 幕が閉じたあと */
+  #finale { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; opacity: 0; transition: opacity 4s; }
+  #finale .end { font-size: clamp(60px, 14vw, 180px); color: #f0d890; letter-spacing: 0.2em; padding-left: 0.2em; }
+  #again {
+    margin-top: 6vh; font: inherit; font-size: clamp(12px, 1.4vw, 16px); color: #fff4e0; background: none; border: none; opacity: 0.6;
+    cursor: pointer; pointer-events: none; text-shadow: inherit; padding: 0.5em 1em;
+  }
+  #again:hover { opacity: 1; }
+</style>
+</head>
+<body>
+<canvas id="screen"></canvas>
+<div id="ui">
+  <div id="debug"></div>
+  <div id="hint">クリックでカーソルを固定（Escで解除）</div>
+  <div id="caption"></div>
+  <div id="credits"></div>
+  <div id="finale"><div class="end">終</div><button id="again" type="button">もういちど（クリックで最初から）</button></div>
+  <div id="list"><h1>たべたもの</h1><ul></ul><p></p></div>
+</div>
+<script type="module" src="src/main.js"></script>
+</body>
+</html>
