@@ -60,9 +60,11 @@ function drawCursor() {
 
 // ---- 数値 ----
 const START_FLIES = 60;
-const TARGET_FLIES = 1200;   // 終幕の匹数（モノが24種に増えたので、試作 ver1 の 1,000 から少し延ばした）
+const TARGET_FLIES = 40000;  // 終幕の匹数: 群れが画面いっぱいに広がる数（動きの計算は5,000匹、残りは分身として描く）
 const BITE_PROB = 0.06;      // 1匹が1フレームにアイテム上でかじる確率
-const GROWTH = { small: 30, mid: 50, large: 80 }; // 食べ切ったときの増加匹数（約20個で終幕）
+// 食べ切ったときの増え方は掛け算（いまの匹数の何倍になるか）。数が多いほど食べるのも速く、後半は雪だるま式に増える
+const GROWTH = { small: 1.3, mid: 1.5, large: 1.8 };
+const BREED = 0.006;         // 何もしなくても1秒に0.6%ずつ自然に増える（約2分で2倍）
 
 // アイテムの大きさの区分（増加量）と、出やすさ。レコードは曲ごとに楽しめるよう3倍出やすい
 const ITEM_DEF = {
@@ -91,7 +93,7 @@ function rng(seed) { // mulberry32
 }
 function newItem(name, x, y, variant) {
   const it = makeItem(name, { variant });
-  return { it, name, variant, x: Math.round(x), y: Math.round(y), grow: GROWTH[ITEM_DEF[name]], awarded: 0, done: false, fired: false };
+  return { it, name, variant, x: Math.round(x), y: Math.round(y), mult: GROWTH[ITEM_DEF[name]], base: 0, awarded: 0, done: false, fired: false };
 }
 function chunkAt(cx, cy) {
   const key = cx + ',' + cy;
@@ -129,7 +131,7 @@ const cam = { x: 0, y: 0 };
 const centroid = { x: W / 2, y: H / 2 }; // 群れの中心（世界座標）
 const EDGE_X = 72, EDGE_Y = 44;
 function updateCamera(dt) {
-  const px = swarm.positions.x, py = swarm.positions.y, n = swarm.count;
+  const px = swarm.positions.x, py = swarm.positions.y, n = swarm.sim;
   let sx = 0, sy = 0;
   for (let i = 0; i < n; i++) { sx += px[i]; sy += py[i]; }
   centroid.x = sx / n; centroid.y = sy / n;
@@ -170,7 +172,7 @@ function startAudio() {
   wingGain.connect(master);
   wings = createWingSound(actx);
   wings.connect(wingGain);
-  wings.setCount(flies);
+  wings.setCount(Math.floor(flies));
 }
 for (const ev of ['pointerdown', 'keydown']) window.addEventListener(ev, startAudio);
 const harmonize = (glide) => (pcs) => { chord = pcs; wings.setHarmony(pcs, glide); };
@@ -294,7 +296,7 @@ function showCaption(s) {
 
 function eatFrame() {
   const px = swarm.positions.x, py = swarm.positions.y;
-  const n = swarm.count;
+  const n = swarm.sim; // 動きを計算している個体だけがかじる（分身はかじらない）
   for (let i = 0; i < n; i++) {
     const x = px[i] | 0, y = py[i] | 0;
     for (const o of nearby) {
@@ -321,7 +323,8 @@ function eatFrame() {
       bite(o.it, o.it.w / 2, o.it.h / 2, Math.max(o.it.w, o.it.h));
       o.done = true;
     }
-    const goal = Math.round(o.grow * (o.done ? 1 : frac));
+    if (!o.base && frac > 0) o.base = flies; // かじり始めたときの匹数を基準に、食べた割合ぶん増やす
+    const goal = o.base * (o.mult - 1) * (o.done ? 1 : frac);
     if (goal > o.awarded) { flies += goal - o.awarded; o.awarded = goal; }
   }
   flies = Math.min(flies, swarm.max);
@@ -410,11 +413,11 @@ function showList() {
 }
 
 // ---- テスト用キー（本番では外す） ----
-// D: デバッグ表示  N: ハエ+100匹（終幕の確認用）
+// D: デバッグ表示  N: ハエ×1.5倍（終幕の確認用）
 let debug = true;
 window.addEventListener('keydown', (e) => {
   if (e.key === 'd' || e.key === 'D') debug = !debug;
-  else if ((e.key === 'n' || e.key === 'N') && state === 'play') flies = Math.min(flies + 100, TARGET_FLIES);
+  else if ((e.key === 'n' || e.key === 'N') && state === 'play') flies = Math.min(flies * 1.5, TARGET_FLIES);
 });
 
 let msAvg = 0, debugText = '';
@@ -461,9 +464,11 @@ function frame(now) {
   collectNearby();
   if (state === 'play') {
     eatFrame();
+    flies = Math.min(TARGET_FLIES, flies * (1 + BREED * dt));
     if (flies >= TARGET_FLIES) startEnding();
   }
-  if (flies !== swarm.count) { swarm.setCount(flies); if (wings) wings.setCount(flies); }
+  const nf = Math.floor(flies);
+  if (nf !== swarm.count) { swarm.setCount(nf); if (wings) wings.setCount(nf); }
   updateCamera(dt);
   updateParts(dt);
 

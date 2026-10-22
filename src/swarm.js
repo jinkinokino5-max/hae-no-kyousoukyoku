@@ -11,7 +11,17 @@
 const TAU = Math.PI * 2;
 
 export function createSwarm(W, H, opts = {}) {
-  const MAX = opts.max ?? 4000;
+  const MAX = opts.max ?? 5000;          // 動きを計算する個体の上限
+  // 上限を超えた分は「分身」として描く: 本物の個体 i の、自分の追従点まわりの位置を
+  // 回転・拡大して写した場所に描く。群れと一緒に生き物らしく動き、計算はほぼ増えない。
+  const CLONES = opts.clones ?? 7;       // 1個体あたりの分身の数 → 見た目の最大 = MAX × (1 + CLONES)
+  const TOTAL_MAX = MAX * (1 + CLONES);
+  const cloneCos = new Float32Array(CLONES + 1), cloneSin = new Float32Array(CLONES + 1);
+  for (let k = 1; k <= CLONES; k++) {
+    const a = k * 2.39996;               // 黄金角ずつ回す（重なりにくい）
+    const sc = 1.0 + 0.6 * ((k * 0.618) % 1); // 分身は本物より外側寄りに散らし、群れの縁まで埋める
+    cloneCos[k] = Math.cos(a) * sc; cloneSin[k] = Math.sin(a) * sc;
+  }
 
   // ---- 個体ごとの状態 ----
   const px = new Float32Array(MAX), py = new Float32Array(MAX);   // 位置
@@ -35,7 +45,8 @@ export function createSwarm(W, H, opts = {}) {
   let spread = 1;                           // 群れの広がりの倍率（梅干しできゅっと縮む）
   let palette = null;                       // 個体ごとの色（絵の具で色とりどりに）。null なら tint 一色
 
-  let count = 0;
+  let count = 0;      // 見た目の匹数（分身を含む）
+  let sim = 0;        // 動きを計算している個体数（≤ MAX）
   let time = 0;
   let frame = 0;
 
@@ -74,29 +85,37 @@ export function createSwarm(W, H, opts = {}) {
   }
 
   function setCount(n) {
-    n = Math.max(0, Math.min(MAX, n | 0));
-    if (n > count) {
+    n = Math.max(0, Math.min(TOTAL_MAX, n | 0));
+    const s = Math.min(n, MAX);
+    if (s > sim) {
       // 新しいハエは群れの中心付近（いまのカーソル位置）から生まれる
-      for (let i = count; i < n; i++) spawn(i, lastTx, lastTy);
+      for (let i = sim; i < s; i++) spawn(i, lastTx, lastTy);
     }
+    sim = s;
     count = n;
     api.count = count;
+    api.sim = sim;
   }
 
   // 群れの大きさ: 数が増えるほど少しずつ広がる
   function swarmRadius() {
-    return (8 + Math.sqrt(count) * 0.62) * spread;
+    // 4万匹でおよそ画面いっぱい（半径150px）になる広がり
+    return (8 + Math.sqrt(count) * 0.71) * spread;
   }
+
+  // 数が増えるほど群れを横に引き伸ばす（横長の画面を埋めるため。最大で1.55倍）
+  function aspect() { return 1 + 0.55 * Math.min(1, count / TOTAL_MAX); }
 
   function step(dt, tx, ty) {
     time += dt;
     const R = swarmRadius();
+    const asp = aspect();
     const damp = Math.exp(-2.6 * dt);          // 速度の減衰（空気抵抗）
     const noise = 90 + jitter * 260;           // ランダムな力の強さ
     const dartP = 0.25 * dt;                   // 1匹あたり1秒に0.25回ほど飛び出す
     const maxV = 160;
 
-    for (let i = 0; i < count; i++) {
+    for (let i = 0; i < sim; i++) {
       // 自分なりの遅れでカーソルを追う
       const k = 1 - Math.exp(-lag[i] * dt);
       ax[i] += (tx - ax[i]) * k;
@@ -107,7 +126,7 @@ export function createSwarm(W, H, opts = {}) {
       const r = R * rad[i] * (0.85 + 0.15 * Math.sin(time * 0.7 + rph[i]));
       const ox = Math.cos(th[i]) * r;
       const oy = Math.sin(th[i]) * r * ecc[i];
-      const gx = ax[i] + ox * tc[i] - oy * ts[i];
+      const gx = ax[i] + (ox * tc[i] - oy * ts[i]) * asp;
       const gy = ay[i] + ox * ts[i] + oy * tc[i];
 
       // バネ＋ランダムな力
@@ -172,7 +191,7 @@ export function createSwarm(W, H, opts = {}) {
     const WR = 225, WG = 228, WB = 235; // 羽の光（わずかに青白い）
 
     // 1) 影: 体の右下を少し暗くして、机から浮いて見せる
-    for (let i = 0; i < count; i++) {
+    for (let i = 0; i < sim; i++) {
       const x = (px[i] - camX + 1.5) | 0, y = (py[i] - camY + 2.5) | 0;
       if (x < 0 || y < 0 || x >= W || y >= H) continue;
       const o = y * W + x;
@@ -184,7 +203,7 @@ export function createSwarm(W, H, opts = {}) {
 
     // 2) 羽: 個体ごとの位相で体の上の1ピクセルがちらちら光る
     const f = frame;
-    for (let i = 0; i < count; i++) {
+    for (let i = 0; i < sim; i++) {
       if (((wph[i] + f) & 3) !== 0) continue;
       let xf = px[i] - camX, yf = py[i] - camY - 1;
       if (jAmp > 0) { xf += (rnd() - 0.5) * jAmp; yf += (rnd() - 0.5) * jAmp; }
@@ -199,12 +218,28 @@ export function createSwarm(W, H, opts = {}) {
 
     // 3) 体: 1ピクセル
     const pal = palette, pn = pal ? pal.length : 0;
-    for (let i = 0; i < count; i++) {
+    for (let i = 0; i < sim; i++) {
       let xf = px[i] - camX, yf = py[i] - camY;
       if (jAmp > 0) { xf += (rnd() - 0.5) * jAmp; yf += (rnd() - 0.5) * jAmp; }
       const x = xf | 0, y = yf | 0;
       if (x < 0 || y < 0 || x >= W || y >= H) continue;
       buf[y * W + x] = pn ? pal[wph[i] % pn] : body;
+    }
+    // 4) 分身: 個体 i の追従点からのずれを回転・拡大した位置に、体だけを描く
+    for (let k = 1; k <= CLONES; k++) {
+      const base = k * sim;
+      if (base >= count) break;
+      const c = cloneCos[k], sn = cloneSin[k], asp = aspect(), inv = 1 / asp;
+      const m = Math.min(sim, count - base);
+      for (let i = 0; i < m; i++) {
+        // 横の引き伸ばしを戻してから回転し、もう一度引き伸ばす（分身も横長の群れに収まる）
+        const dx = (px[i] - ax[i]) * inv, dy = py[i] - ay[i];
+        let xf = ax[i] + (dx * c - dy * sn) * asp - camX, yf = ay[i] + dx * sn + dy * c - camY;
+        if (jAmp > 0) { xf += (rnd() - 0.5) * jAmp; yf += (rnd() - 0.5) * jAmp; }
+        const x = xf | 0, y = yf | 0;
+        if (x < 0 || y < 0 || x >= W || y >= H) continue;
+        buf[y * W + x] = pn ? pal[(wph[i] + k * 37) % pn] : body;
+      }
     }
   }
 
@@ -232,7 +267,8 @@ export function createSwarm(W, H, opts = {}) {
 
   const api = {
     count: 0,
-    max: MAX,
+    sim: 0,
+    max: TOTAL_MAX,
     setCount,
     update,
     draw,
