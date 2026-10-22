@@ -12,12 +12,48 @@ canvas.height = H;
 // 群れの描画で毎フレーム getImageData するため willReadFrequently を指定
 const ctx = canvas.getContext('2d', { willReadFrequently: true });
 
+// ---- カーソル: クリックで画面に固定（Pointer Lock）。Esc を押すまで外に出ない ----
+// 固定中は移動量(movementX/Y)だけが届くので、画面内の仮想カーソルを自前で動かし、縁で止める。
 const mouse = { x: W / 2, y: H / 2 }; // 画面座標
-canvas.addEventListener('pointermove', (e) => {
-  const r = canvas.getBoundingClientRect();
-  mouse.x = ((e.clientX - r.left) / r.width) * W;
-  mouse.y = ((e.clientY - r.top) / r.height) * H;
+const locked = () => document.pointerLockElement === canvas;
+canvas.addEventListener('click', () => {
+  if (locked()) return;
+  // 新しい Chrome は Promise を返す。拒否されても（直後の再要求など）遊びは続けられるので握りつぶす
+  const p = canvas.requestPointerLock();
+  if (p && p.catch) p.catch(() => {});
 });
+window.addEventListener('mousemove', (e) => {
+  const r = canvas.getBoundingClientRect();
+  if (locked()) {
+    // 矢印（6x7）が隠れない範囲で縁に止める
+    mouse.x = Math.max(0, Math.min(W - 6, mouse.x + e.movementX * W / r.width));
+    mouse.y = Math.max(0, Math.min(H - 7, mouse.y + e.movementY * H / r.height));
+  } else if (e.target === canvas) {
+    mouse.x = ((e.clientX - r.left) / r.width) * W;
+    mouse.y = ((e.clientY - r.top) / r.height) * H;
+  }
+});
+
+// ゲーム内のカーソル（OS のカーソルは固定中に消えるため）。机の上で見えるよう、明るい縁取りの小さな矢印
+const CURSOR = [
+  '1.....',
+  '121...',
+  '1221..',
+  '12221.',
+  '122111',
+  '1121..',
+  '1..1..',
+];
+function drawCursor() {
+  const x0 = Math.round(mouse.x), y0 = Math.round(mouse.y);
+  CURSOR.forEach((row, y) => {
+    for (let x = 0; x < row.length; x++) {
+      if (row[x] === '.') continue;
+      ctx.fillStyle = row[x] === '1' ? '#2a1a12' : '#fff4e0';
+      ctx.fillRect(x0 + x, y0 + y, 1, 1);
+    }
+  });
+}
 
 // ---- 試作の数値（開発手順 ver1 の表に対応） ----
 const START_FLIES = 60;
@@ -278,7 +314,6 @@ function drawDebug(fps) {
   ctx.textAlign = 'left';
   ctx.textBaseline = 'top';
   ctx.fillText(`${swarm.count}/${TARGET_FLIES} flies  ${msAvg.toFixed(2)}ms  ${fps}fps`, 2, 2);
-  if (!started) ctx.fillText('クリックかキーで音が始まります', 2, H - 10);
 }
 
 let last = performance.now();
@@ -329,6 +364,14 @@ function frame(now) {
   fpsCount++; fpsTime += dt;
   if (fpsTime >= 0.5) { fps = Math.round(fpsCount / fpsTime); fpsCount = 0; fpsTime = 0; }
   if (debug && state === 'play') drawDebug(fps);
+  if (!locked()) {
+    ctx.fillStyle = 'rgba(255,240,210,0.85)';
+    ctx.font = '8px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'top';
+    ctx.fillText('クリックでカーソルを固定（Escで解除）', W - 3, H - 10);
+  }
+  drawCursor();
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
