@@ -29,7 +29,8 @@ export function createSwarm(W, H, opts = {}) {
   const ax = new Float32Array(MAX), ay = new Float32Array(MAX);   // 遅れて追うカーソル位置
   const th = new Float32Array(MAX);    // 軌道上の角度
   const om = new Float32Array(MAX);    // 角速度（符号＝回転方向）
-  const rad = new Float32Array(MAX);   // 軌道半径の基準（0..1、群れの大きさを掛ける）
+  const rad = new Float32Array(MAX);   // 軌道半径の基準（0..1、群れの大きさを掛ける）。中心に濃い分布
+  const radU = new Float32Array(MAX);  // 同じ個体の「円の中に均一に散らばる」場合の半径（大群のとき用）
   const ecc = new Float32Array(MAX);   // 楕円の縦横比
   const tc = new Float32Array(MAX), ts = new Float32Array(MAX); // 楕円の傾き(cos,sin)
   const rph = new Float32Array(MAX);   // 半径のゆらぎ位相
@@ -71,7 +72,9 @@ export function createSwarm(W, H, opts = {}) {
     ax[i] = x; ay[i] = y;
     th[i] = rnd() * TAU;
     // 中心ほど密に、外側はまばらに
-    rad[i] = 0.12 + 0.88 * Math.pow(rnd(), 1.4);
+    const u = rnd();
+    rad[i] = 0.12 + 0.88 * Math.pow(u, 1.4);
+    radU[i] = Math.sqrt(u);              // 半径の2乗が一様 → 面積あたりの密度が均一
     // 外側ほどゆっくり回る。回転方向は7割が同じ向き（群れ全体にゆるい渦ができる）
     const dir = rnd() < 0.7 ? 1 : -1;
     om[i] = dir * (0.6 + rnd() * 1.6) / (0.4 + rad[i]);
@@ -99,8 +102,8 @@ export function createSwarm(W, H, opts = {}) {
 
   // 群れの大きさ: 数が増えるほど少しずつ広がる
   function swarmRadius() {
-    // 4万匹でおよそ画面いっぱい（半径150px）になる広がり
-    return (8 + Math.sqrt(count) * 0.71) * spread;
+    // 数が増えるほどカーソルから離れて広く散る（4万匹で半径約190px＝画面の外まで）
+    return (8 + Math.sqrt(count) * 0.9) * spread;
   }
 
   // 数が増えるほど群れを横に引き伸ばす（横長の画面を埋めるため。最大で1.55倍）
@@ -110,6 +113,8 @@ export function createSwarm(W, H, opts = {}) {
     time += dt;
     const R = swarmRadius();
     const asp = aspect();
+    // 少ないうちは中心に濃く集まり、増えるほど「円の中に均一に散らばる」分布へ移る（穴も塊もない広がり）
+    const f = Math.sqrt(Math.min(1, count / TOTAL_MAX)), f1 = 1 - f;
     const damp = Math.exp(-2.6 * dt);          // 速度の減衰（空気抵抗）
     const noise = 90 + jitter * 260;           // ランダムな力の強さ
     const dartP = 0.25 * dt;                   // 1匹あたり1秒に0.25回ほど飛び出す
@@ -123,7 +128,7 @@ export function createSwarm(W, H, opts = {}) {
 
       // 軌道上の目標点
       th[i] += om[i] * dt;
-      const r = R * rad[i] * (0.85 + 0.15 * Math.sin(time * 0.7 + rph[i]));
+      const r = R * (rad[i] * f1 + radU[i] * f) * (0.85 + 0.15 * Math.sin(time * 0.7 + rph[i]));
       const ox = Math.cos(th[i]) * r;
       const oy = Math.sin(th[i]) * r * ecc[i];
       const gx = ax[i] + (ox * tc[i] - oy * ts[i]) * asp;

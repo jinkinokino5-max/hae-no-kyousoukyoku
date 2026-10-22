@@ -105,15 +105,19 @@ function scheduleChord(ctx, at, pcs, onChord, timers) {
 // ---- レコード（Step 6） ----
 // 針を落とす → パチパチ音 → こもった音がゆっくり開いて曲が立ち上がる。曲（songs.js の1曲）はループする。
 // onChord(pcs) で、いま鳴っている和音（G=0 とした半音の音名）を知らせる。羽音の基本音 196Hz が G なので。
-export function startRecordMusic(ctx, dest, { onChord, song = SONGS[SONGS.length - 1] } = {}) {
+// onNote(midi, 時刻, 長さ) で旋律の各音を先回りして知らせる（羽音が旋律を歌うため）。
+// loop=false なら1回だけ流して onEnd を呼ぶ。vinyl=false なら針の音と蓄音機風の立ち上がりを省く。
+export function startRecordMusic(ctx, dest, { onChord, onNote, onEnd, song = SONGS[SONGS.length - 1], loop = true, vinyl = true } = {}) {
   const out = ctx.createGain();
   out.gain.value = 0;
-  const tone = ctx.createBiquadFilter(); tone.type = 'lowpass'; tone.frequency.value = 350; tone.Q.value = 0.5;
+  const tone = ctx.createBiquadFilter(); tone.type = 'lowpass'; tone.frequency.value = vinyl ? 350 : 4200; tone.Q.value = 0.5;
   out.connect(tone);
   tone.connect(makeRoom(ctx, dest, 0.4));
   const now = ctx.currentTime;
-  out.gain.setTargetAtTime(0.55, now + 1.2, 1.5);
-  tone.frequency.setTargetAtTime(4200, now + 2.0, 3.0); // 古い蓄音機からだんだん近くで鳴っているように
+  out.gain.setTargetAtTime(0.55, now + (vinyl ? 1.2 : 0), vinyl ? 1.5 : 0.3);
+  if (vinyl) tone.frequency.setTargetAtTime(4200, now + 2.0, 3.0); // 古い蓄音機からだんだん近くで鳴っているように
+  // 旋律だけの音量（ハエが増えて羽音が旋律を引き継ぐと、楽器の旋律を少し控える。伴奏はそのまま）
+  const lead = ctx.createGain(); lead.gain.value = 1; lead.connect(out);
 
   // レコードのパチパチ（まばらなインパルス）とサーッという地のノイズ
   const crackle = ctx.createBufferSource();
@@ -125,19 +129,22 @@ export function startRecordMusic(ctx, dest, { onChord, song = SONGS[SONGS.length
   crackle.buffer = cb; crackle.loop = true;
   const cf = ctx.createBiquadFilter(); cf.type = 'bandpass'; cf.frequency.value = 2500; cf.Q.value = 0.6;
   const cg = ctx.createGain(); cg.gain.value = 0;
-  cg.gain.setTargetAtTime(0.18, now, 0.05);   // 針を落とした瞬間に立ち上がり
-  cg.gain.setTargetAtTime(0.07, now + 3, 2);  // 曲が始まると後ろに下がる
+  if (vinyl) {
+    cg.gain.setTargetAtTime(0.18, now, 0.05);   // 針を落とした瞬間に立ち上がり
+    cg.gain.setTargetAtTime(0.07, now + 3, 2);  // 曲が始まると後ろに下がる
+  }
   crackle.connect(cf); cf.connect(cg); cg.connect(dest);
   crackle.start(now);
 
   const note = makePlayer(ctx, out);
+  const leadNote = makePlayer(ctx, lead);
   const melody = parseMelody(song.melody);
   const bars = parseChords(song.chords);
   const beat = song.beat, meter = song.meter, pickup = song.pickup || 0;
   const loopLen = bars.length * meter * beat;
   const vol = song.vol ?? 1;
   const timers = [];
-  let alive = true, t0 = now + 3.0;
+  let alive = true, t0 = now + (vinyl ? 3.0 : 0.3);
 
   // 伴奏の刻み方（曲ごと）。part: 小節を和音の数で割った1区間
   function accompany(c, st, len) {
@@ -165,7 +172,10 @@ export function startRecordMusic(ctx, dest, { onChord, song = SONGS[SONGS.length
   function schedule() {
     if (!alive) return;
     let t = t0;
-    for (const [m, b] of melody) { if (m !== null) note(m, t, b * beat * 1.6 + 0.15, 0.13 * vol); t += b * beat; }
+    for (const [m, b] of melody) {
+      if (m !== null) { leadNote(m, t, b * beat * 1.6 + 0.15, 0.13 * vol); if (onNote) onNote(m, t, b * beat); }
+      t += b * beat;
+    }
     bars.forEach((parts, i) => {
       const len = meter * beat / parts.length;
       parts.forEach((c, j) => {
@@ -175,12 +185,17 @@ export function startRecordMusic(ctx, dest, { onChord, song = SONGS[SONGS.length
       });
     });
     t0 += loopLen;
+    if (!loop) { // 1回だけ: 曲の終わりに知らせる
+      if (onEnd) timers.push(setTimeout(() => { alive = false; onEnd(); }, (t0 - ctx.currentTime + 1.0) * 1000));
+      return;
+    }
     // 次の周回を、今回が終わる少し前に予約する（ループ）
     timers.push(setTimeout(schedule, Math.max(500, (t0 - ctx.currentTime - 2) * 1000)));
   }
   schedule();
 
   return {
+    setLead(v) { lead.gain.setTargetAtTime(v, ctx.currentTime, 0.8); },
     stop(fade = 0.6) {
       alive = false;
       timers.forEach(clearTimeout);
@@ -196,11 +211,13 @@ export function startRecordMusic(ctx, dest, { onChord, song = SONGS[SONGS.length
 
 // ---- 終幕の曲（Step 7）: 蛍の光（スコットランド民謡 Auld Lang Syne。伝承曲のためパブリックドメイン） ----
 // ヘ長調・4拍子で、ゆっくり。最後は少しずつ遅くなる。onChord で羽音を和音へ寄せ、onEnd で曲の終わりを知らせる。
-export function startFarewell(ctx, dest, { onChord, onEnd } = {}) {
+export function startFarewell(ctx, dest, { onChord, onNote, onEnd } = {}) {
   const out = ctx.createGain();
   out.gain.value = 0.6;
   out.connect(makeRoom(ctx, dest, 0.55));
   const note = makePlayer(ctx, out);
+  const lead = ctx.createGain(); lead.gain.value = 1; lead.connect(out);
+  const leadNote = makePlayer(ctx, lead);
 
   // [MIDIノート, 拍]（C4=60）。1小節目の前に1拍の弱起
   const C4 = 60, D4 = 62, F4 = 65, G4 = 67, A4 = 69, C5 = 72, D5 = 74;
@@ -237,7 +254,8 @@ export function startFarewell(ctx, dest, { onChord, onEnd } = {}) {
   let b = 0;
   for (const [m, len] of melody) {
     const t = timeAt(b), dur = timeAt(b + len) - t;
-    note(m, t, dur * 1.5, 0.15, 0.04);
+    leadNote(m, t, dur * 1.5, 0.15, 0.04);
+    if (onNote) onNote(m, t, dur);
     b += len;
   }
   bars.forEach((ch, i) => {
@@ -256,6 +274,7 @@ export function startFarewell(ctx, dest, { onChord, onEnd } = {}) {
 
   return {
     duration: end - ctx.currentTime,
+    setLead(v) { lead.gain.setTargetAtTime(v, ctx.currentTime, 0.8); },
     stop() { timers.forEach(clearTimeout); out.gain.setTargetAtTime(0, ctx.currentTime, 0.5); },
   };
 }

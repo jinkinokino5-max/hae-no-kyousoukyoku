@@ -334,6 +334,61 @@ export function createWingSound(audioCtx, options = {}) {
     updateVoiceShapes();
   }
 
+  // ---- 羽音の旋律（群れが曲を“歌う”） ----
+  // 羽音と同じ音色の3本（わずかに音程をずらして群れの厚み）を、曲の旋律の音程へ滑らせて鳴らす。
+  // 音は切らずに、音符ごとに少し膨らんでは引く（ハエは羽ばたきを止めないので、レガートで歌う）。
+  const melGain = ctx.createGain(); melGain.gain.value = 0;   // 旋律の量（ハエが多いほど大きく）
+  const melEnv = ctx.createGain(); melEnv.gain.value = 0;     // 音符ごとの抑揚
+  melEnv.connect(melGain);
+  melGain.connect(tone);
+  const melFreq = ctx.createConstantSource(); melFreq.offset.value = opt.baseFreq;
+  const melVib = ctx.createOscillator(); melVib.frequency.value = 5.3;
+  const melVibAmt = ctx.createGain(); melVibAmt.gain.value = 9;  // ±9cent のゆるいビブラート
+  melVib.connect(melVibAmt);
+  const melNodes = [melFreq, melVib];
+  for (const [cents, amp, flut] of [[-9, 0.3, 6.1], [0, 0.34, 7.3], [8, 0.3, 8.7]]) {
+    const o = ctx.createOscillator();
+    o.setPeriodicWave(wave);
+    o.frequency.value = 0;
+    melFreq.connect(o.frequency);
+    o.detune.value = cents;
+    melVibAmt.connect(o.detune);
+    const g = ctx.createGain(); g.gain.value = amp;
+    const lfo = ctx.createOscillator(); lfo.frequency.value = flut;   // 羽ばたきのゆらぎ
+    const lfoAmt = ctx.createGain(); lfoAmt.gain.value = amp * 0.25;
+    lfo.connect(lfoAmt); lfoAmt.connect(g.gain);
+    o.connect(g); g.connect(melEnv);
+    o.start(); lfo.start();
+    melNodes.push(o, lfo);
+  }
+  melFreq.start(); melVib.start();
+
+  // 旋律の1音を AudioContext の時刻 when に予約する（曲の再生側が先回りして呼ぶ）。
+  // 羽音の高さ（G3 付近）に合うよう、オクターブを C3〜A#4 に折りたたむ
+  function playNote(midi, when, dur) {
+    if (disposed || midi == null) return;
+    let m = midi - 12;
+    while (m > 70) m -= 12;
+    while (m < 48) m += 12;
+    const f = 440 * Math.pow(2, (m - 69) / 12);
+    melFreq.offset.setTargetAtTime(f, when, 0.03);                    // すっと滑って次の音へ
+    melEnv.gain.setTargetAtTime(1, when, 0.04);
+    melEnv.gain.setTargetAtTime(0.45, when + Math.max(0.08, dur * 0.7), Math.max(0.05, dur * 0.25));
+  }
+  // 予約済みの旋律を取り消して、静かに引く（曲が変わる・止まるとき）
+  function melodyOff() {
+    if (disposed) return;
+    const now = ctx.currentTime;
+    melFreq.offset.cancelScheduledValues(now);
+    melEnv.gain.cancelScheduledValues(now);
+    melEnv.gain.setTargetAtTime(0, now, 0.3);
+  }
+  // 0..1。ハエが少ないうちは楽器が旋律を弾き、増えるほど羽音が旋律を引き継ぐ
+  function setMelodyAmount(k) {
+    if (disposed) return;
+    melGain.gain.setTargetAtTime(Math.max(0, Math.min(1, k)) * 0.6, ctx.currentTime, 0.6);
+  }
+
   function connect(node) {
     out.connect(node);
     return node;
@@ -347,6 +402,7 @@ export function createWingSound(audioCtx, options = {}) {
     out.gain.setTargetAtTime(0, now, 0.05);
     for (const v of voices) if (v) releaseVoice(v);
     try { noise.stop(now + 0.5); pitch.stop(now + 1.6); } catch (_) { /* noop */ }
+    for (const node of melNodes) try { node.stop(now + 0.5); } catch (_) { /* noop */ }
     setTimeout(() => {
       for (const node of [noise, noiseBand, noiseGain, voiceBus, tone, level, comp, limiter, out, pitch]) {
         try { node.disconnect(); } catch (_) { /* noop */ }
@@ -367,5 +423,5 @@ export function createWingSound(audioCtx, options = {}) {
     };
   }
 
-  return { setCount, setPitchShift, setHarmony, connect, dispose, stats };
+  return { setCount, setPitchShift, setHarmony, playNote, melodyOff, setMelodyAmount, connect, dispose, stats };
 }

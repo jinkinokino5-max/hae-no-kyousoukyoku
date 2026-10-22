@@ -63,7 +63,7 @@ const START_FLIES = 60;
 const TARGET_FLIES = 40000;  // 終幕の匹数: 群れが画面いっぱいに広がる数（動きの計算は5,000匹、残りは分身として描く）
 const BITE_PROB = 0.06;      // 1匹が1フレームにアイテム上でかじる確率
 // 食べ切ったときの増え方は掛け算（いまの匹数の何倍になるか）。数が多いほど食べるのも速く、後半は雪だるま式に増える
-const GROWTH = { small: 1.3, mid: 1.5, large: 1.8 };
+const GROWTH = { small: 2.5, mid: 3.5, large: 5 };  // 増える分（倍率−1）を以前の5倍に
 const BREED = 0.006;         // 何もしなくても1秒に0.6%ずつ自然に増える（約2分で2倍）
 
 // アイテムの大きさの区分（増加量）と、出やすさ。レコードは曲ごとに楽しめるよう3倍出やすい
@@ -268,11 +268,12 @@ function fireAction(o) {
     // 音楽: レコードごとに違う曲。羽音がその和音へ溶けていく
     case 'record':
       if (music && musicSong === o.variant) break;
-      if (music) music.stop(2.0);
+      if (music) { music.stop(2.0); wings.melodyOff(); }
       if (radio) { radio.stop(1.5); radio = null; }                               // 音楽の出どころは1つにする
       wings.setPitchShift(0);
-      music = startRecordMusic(actx, master, { song: SONGS[o.variant], onChord: harmonize(2.0) });
+      music = startRecordMusic(actx, master, { song: SONGS[o.variant], onChord: harmonize(2.0), onNote: wings.playNote });
       musicSong = o.variant;
+      singing = -1; updateSinging(swarm.count);
       heard.push(SONGS[o.variant].title);
       showCaption('♪ ' + SONGS[o.variant].title);
       break;
@@ -280,6 +281,20 @@ function fireAction(o) {
   }
 }
 const firedLate = []; // 音が未開始のときに発動を待つ「音」のアクション
+
+// ハエが増えるほど、羽音が曲の旋律を引き継ぐ（50匹で0 → 4万匹で1）。
+// 伴奏は楽器のまま残し、楽器の旋律も半分ほどは残す（曲として分かりやすいように）
+let singing = -1;
+function updateSinging(n) {
+  if (!wings) return;
+  const k = Math.max(0, Math.min(1, (Math.log10(Math.max(1, n)) - 1.7) / 2.9));
+  if (Math.abs(k - singing) < 0.02) return;
+  singing = k;
+  wings.setMelodyAmount(k);
+  const lead = 1 - 0.5 * k;
+  if (music) music.setLead(lead);
+  if (farewell) farewell.setLead(lead);
+}
 
 // 曲名などを画面下にしばらく表示する（文字は HTML で重ねる。低解像度キャンバスだと潰れるため）
 const ui = {
@@ -352,17 +367,19 @@ function startEnding() {
   playSec = (performance.now() - playStart) / 1000;
   if (actx) {
     if (radio) { radio.stop(3); radio = null; }
-    if (music) { music.stop(2.5); music = null; }
+    if (music) { music.stop(2.5); music = null; wings.melodyOff(); }
     for (const k of Object.keys(ambient)) { ambient[k].stop(); delete ambient[k]; }
     wings.setPitchShift(0);
     farewell = startFarewell(actx, master, {
-      onChord: harmonize(1.5), // 羽音が別れの曲の和音を奏でる
+      onChord: harmonize(1.5), // 羽音が別れの曲の和音を奏で、旋律も歌う
+      onNote: wings.playNote,
       onEnd: () => {
         // 曲が終わったら、羽音もゆっくり消えていく
         wingGain.gain.setTargetAtTime(0, actx.currentTime, 2.5);
       },
     });
     curtainSec = farewell.duration * 0.88; // 最後の数音のあいだに閉じきる
+    singing = -1; updateSinging(swarm.count);
   }
 }
 
@@ -468,7 +485,7 @@ function frame(now) {
     if (flies >= TARGET_FLIES) startEnding();
   }
   const nf = Math.floor(flies);
-  if (nf !== swarm.count) { swarm.setCount(nf); if (wings) wings.setCount(nf); }
+  if (nf !== swarm.count) { swarm.setCount(nf); if (wings) wings.setCount(nf); updateSinging(nf); }
   updateCamera(dt);
   updateParts(dt);
 
