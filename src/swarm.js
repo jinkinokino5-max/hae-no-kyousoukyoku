@@ -45,7 +45,8 @@ export function createSwarm(W, H, opts = {}) {
     return seed / 4294967296;
   }
 
-  let lastTx = W / 2, lastTy = H / 2;
+  let lastTx = opts.startX ?? W / 2, lastTy = opts.startY ?? H / 2;
+  let camX = 0, camY = 0; // 描画時のカメラ位置（オープンワールド用。W,H は画面＝ビューの大きさ）
 
   function spawn(i, x, y) {
     const a = rnd() * TAU, d = rnd() * 6;
@@ -150,8 +151,9 @@ export function createSwarm(W, H, opts = {}) {
   // ---- 描画 ----
   // ctx に描かれている背景（机）を読み、影→羽→体の順にピクセルを書き込んで戻す。
   // 256x144 程度なら getImageData/putImageData は1フレーム1回で十分軽い。
-  function draw(ctx) {
+  function draw(ctx, cx = 0, cy = 0) {
     if (count === 0) return;
+    camX = cx | 0; camY = cy | 0;
     const img = ctx.getImageData(0, 0, W, H);
     drawInto(img);
     ctx.putImageData(img, 0, 0);
@@ -168,7 +170,7 @@ export function createSwarm(W, H, opts = {}) {
 
     // 1) 影: 体の右下を少し暗くして、机から浮いて見せる
     for (let i = 0; i < count; i++) {
-      const x = (px[i] + 1.5) | 0, y = (py[i] + 2.5) | 0;
+      const x = (px[i] - camX + 1.5) | 0, y = (py[i] - camY + 2.5) | 0;
       if (x < 0 || y < 0 || x >= W || y >= H) continue;
       const o = y * W + x;
       const c = buf[o];
@@ -181,7 +183,7 @@ export function createSwarm(W, H, opts = {}) {
     const f = frame;
     for (let i = 0; i < count; i++) {
       if (((wph[i] + f) & 3) !== 0) continue;
-      let xf = px[i], yf = py[i] - 1;
+      let xf = px[i] - camX, yf = py[i] - camY - 1;
       if (jAmp > 0) { xf += (rnd() - 0.5) * jAmp; yf += (rnd() - 0.5) * jAmp; }
       const x = xf | 0, y = yf | 0;
       if (x < 0 || y < 0 || x >= W || y >= H) continue;
@@ -194,7 +196,7 @@ export function createSwarm(W, H, opts = {}) {
 
     // 3) 体: 1ピクセル
     for (let i = 0; i < count; i++) {
-      let xf = px[i], yf = py[i];
+      let xf = px[i] - camX, yf = py[i] - camY;
       if (jAmp > 0) { xf += (rnd() - 0.5) * jAmp; yf += (rnd() - 0.5) * jAmp; }
       const x = xf | 0, y = yf | 0;
       if (x < 0 || y < 0 || x >= W || y >= H) continue;

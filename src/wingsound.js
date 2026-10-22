@@ -193,7 +193,7 @@ export function createWingSound(audioCtx, options = {}) {
     const osc = ctx.createOscillator();
     osc.setPeriodicWave(wave);
     osc.frequency.value = opt.baseFreq;
-    osc.detune.value = tuning(slot) * 100;
+    osc.detune.value = targetSemis(slot) * 100;
     pitch.connect(osc.detune);
 
     // AMゆらぎ: 羽ばたきの不規則さ（3〜9Hz の速い揺れ）
@@ -271,7 +271,8 @@ export function createWingSound(audioCtx, options = {}) {
       v.flutterDepth.gain.setTargetAtTime(base * (0.45 - 0.3 * crowd), now, TC);
       v.driftAmp.gain.setTargetAtTime(base * 0.3, now, TC);
       // 1匹: 音程はほぼ一定 / 多数: ±(8〜30)cent のうねり（コーラス効果）
-      v.driftPitch.gain.setTargetAtTime(8 + 22 * crowd, now, TC);
+      // 和音に寄せている間はうねりを抑え、和音を濁らせない
+      v.driftPitch.gain.setTargetAtTime((8 + 22 * crowd) * (harmony ? 0.35 : 1), now, TC);
     }
   }
 
@@ -304,6 +305,33 @@ export function createWingSound(audioCtx, options = {}) {
     if (disposed) return;
     const s = Math.max(-24, Math.min(24, Number(semitones) || 0));
     pitch.offset.setTargetAtTime(s * 100, ctx.currentTime, 0.4); // ぬるっと音程が変わる
+  }
+
+  // ---- 和音への引き寄せ（Step 6: レコード／終幕の曲と羽音を重ねる） ----
+  // pcs: baseFreq を 0 とした半音の音名集合（0〜11）。各声部は自然な音程から最も近い和音の音へ寄る。
+  // null で自然な散らばりへ戻る。glide 秒かけて“ぬるっと”移るので、ざわめきが和音へ溶けていくように聞こえる。
+  let harmony = null;
+  function targetSemis(slot) {
+    const s = tuning(slot);
+    if (!harmony) return s;
+    let best = Math.round(s), bestD = Infinity;
+    for (let t = Math.floor(s) - 6; t <= Math.ceil(s) + 6; t++) {
+      if (!harmony.has(((t % 12) + 12) % 12)) continue;
+      const d = Math.abs(t - s);
+      if (d < bestD) { bestD = d; best = t; }
+    }
+    return best;
+  }
+  function setHarmony(pcs, glide = 1.2) {
+    if (disposed) return;
+    harmony = pcs && pcs.length ? new Set(pcs.map((p) => ((p % 12) + 12) % 12)) : null;
+    const now = ctx.currentTime;
+    for (const v of voices) {
+      if (!v || v.releasing) continue;
+      v.osc.detune.cancelScheduledValues(now);
+      v.osc.detune.setTargetAtTime(targetSemis(v.slot) * 100, now, glide / 3);
+    }
+    updateVoiceShapes();
   }
 
   function connect(node) {
@@ -339,5 +367,5 @@ export function createWingSound(audioCtx, options = {}) {
     };
   }
 
-  return { setCount, setPitchShift, connect, dispose, stats };
+  return { setCount, setPitchShift, setHarmony, connect, dispose, stats };
 }
