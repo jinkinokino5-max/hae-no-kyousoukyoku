@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ピクセルアート確認（Step 3）</title>
+<style>
+  body { margin: 0; padding: 16px; background: #1a120c; color: #e6d6b8; font: 14px/1.6 sans-serif; }
+  h1 { font-size: 16px; margin: 0 0 8px; }
+  .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+  input { width: 90px; }
+  canvas { image-rendering: pixelated; display: block; }
+  #screen { width: min(1024px, 100%); aspect-ratio: 256 / 144; height: auto; cursor: crosshair; }
+  #items { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 16px; }
+  .cell { background: #94532a; padding: 8px; text-align: center; }
+  .cell small { display: block; color: #fcf4e2; }
+  .note { color: #bba88a; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>ピクセルアート確認（机＋8アイテム）</h1>
+<div class="bar">
+  <label>机のシード <input id="seed" type="number" value="1"></label>
+  <button id="regen">再生成</button>
+  <button id="random">ランダム</button>
+  <button id="reset">アイテムを元に戻す</button>
+  <span class="note">机をクリックすると、その位置のアイテムが削れる（マスク動作の確認）</span>
+</div>
+<canvas id="screen" width="256" height="144"></canvas>
+<div id="items"></div>
+
+<script type="module">
+import { makeDesk, makeItem, drawItem, bite, ITEM_NAMES, ITEM_LABELS } from './src/pixelart.js';
+
+const W = 256, H = 144;
+const screen = document.getElementById('screen');
+const ctx = screen.getContext('2d');
+const LAYOUT = {
+  banana: [22, 26], mapo: [64, 20], sugar: [114, 30], bread: [150, 22],
+  record: [28, 78], manga: [86, 74], radio: [136, 84], pen: [190, 100],
+};
+let desk, items;
+
+function build() {
+  const seed = parseInt(document.getElementById('seed').value, 10) || 1;
+  const t0 = performance.now();
+  desk = makeDesk(W, H, seed);
+  console.log(`makeDesk: ${(performance.now() - t0).toFixed(1)}ms`);
+  if (!items) resetItems();
+  render();
+}
+function resetItems() {
+  items = ITEM_NAMES.map((n) => ({ item: makeItem(n), x: LAYOUT[n][0], y: LAYOUT[n][1] }));
+}
+function render() {
+  ctx.drawImage(desk, 0, 0);
+  for (const o of items) drawItem(ctx, o.item, o.x, o.y);
+  const box = document.getElementById('items');
+  box.innerHTML = '';
+  const Z = 6;
+  for (const o of items) {
+    const it = o.item;
+    const c = document.createElement('canvas');
+    c.width = it.w * Z; c.height = it.h * Z;
+    const g = c.getContext('2d');
+    g.imageSmoothingEnabled = false;
+    g.drawImage(it.canvas, 0, 0, c.width, c.height);
+    const cell = document.createElement('div');
+    cell.className = 'cell';
+    cell.appendChild(c);
+    const label = document.createElement('small');
+    label.textContent = `${ITEM_LABELS[it.name]}  ${it.w}x${it.h}  残り${Math.round((it.remaining / it.total) * 100)}%`;
+    cell.appendChild(label);
+    box.appendChild(cell);
+  }
+}
+
+screen.addEventListener('click', (e) => {
+  const r = screen.getBoundingClientRect();
+  const mx = ((e.clientX - r.left) / r.width) * W;
+  const my = ((e.clientY - r.top) / r.height) * H;
+  for (const o of items) bite(o.item, mx - o.x, my - o.y, 3);
+  render();
+});
+document.getElementById('regen').onclick = build;
+document.getElementById('random').onclick = () => {
+  document.getElementById('seed').value = Math.floor(Math.random() * 100000);
+  build();
+};
+document.getElementById('reset').onclick = () => { resetItems(); render(); };
+build();
+</script>
+</body>
+</html>
