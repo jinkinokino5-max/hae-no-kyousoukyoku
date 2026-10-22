@@ -4,6 +4,7 @@
 
 ## 遊ぶ
 - **ブラウザで遊ぶ**: https://jinkinokino5-max.github.io/hae-no-kyousoukyoku/
+- **音楽版**（食べたモノごとに有名曲が流れる派生版）: https://jinkinokino5-max.github.io/hae-no-kyousoukyoku-ongaku/
 - **手元で遊ぶ（Windows）**: このフォルダの `起動.bat` をダブルクリック（Python が必要）。
   - 他の環境では、このフォルダで `python -m http.server 8765` を実行し、http://localhost:8765/ を開く。
 
