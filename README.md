@@ -3,8 +3,8 @@
 ハエの大群を動かして机の上のものを食べ、増えていく様子と重なる羽音を味わう、静かな放置系ブラウザゲームの試作です。
 
 ## 遊ぶ
-- **ブラウザで遊ぶ**: https://jinkinokino5-max.github.io/hae-no-kyousoukyoku/
-- **音楽版**（食べたモノごとに有名曲が流れる派生版）: https://jinkinokino5-max.github.io/hae-no-kyousoukyoku-ongaku/
+- **ブラウザで遊ぶ**: https://jinkinokino5-max.github.io/hae-no-kyousoukyoku/ （タイトル画面で「ふつうの版」「音楽版」を選べます）
+- **音楽版**（食べたモノごとに有名曲が流れる派生版）: https://jinkinokino5-max.github.io/hae-no-kyousoukyoku/ongaku/
 - **手元で遊ぶ（Windows）**: このフォルダの `起動.bat` をダブルクリック（Python が必要）。
   - 他の環境では、このフォルダで `python -m http.server 8765` を実行し、http://localhost:8765/ を開く。
 

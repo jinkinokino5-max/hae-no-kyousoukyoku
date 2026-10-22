@@ -3,45 +3,98 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ハエの協奏曲（試作ver1）</title>
+<title>ハエの協奏曲</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=DotGothic16&display=swap" rel="stylesheet">
 <style>
-  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
-  canvas { display: block; width: 100vw; height: 100vh; image-rendering: pixelated; cursor: none; }
-  /* 文字は低解像度キャンバスに描くと潰れるため、画面の解像度のまま HTML で重ねる */
-  #ui {
-    position: fixed; inset: 0; pointer-events: none;
+  /* 公開サイトの入口（タイトル画面）。ふつうの版（play.html）と音楽版（ongaku/）を選ぶ */
+  :root {
+    --bg: #3a2414; --wood: #6b4226; --ink: #fff4e0; --sub: #e8d4b0; --gold: #f0d890;
+    --card: rgba(26, 12, 6, 0.72); --card-hover: rgba(46, 22, 10, 0.86); --line: #c8a048;
+  }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    background-image: repeating-linear-gradient(0deg, rgba(0,0,0,0.10) 0 2px, transparent 2px 38px),
+      linear-gradient(180deg, #6b4226, #4a2c18);
+    color: var(--ink);
     font-family: 'DotGothic16', 'BIZ UDPGothic', 'Yu Gothic', 'Hiragino Kaku Gothic ProN', 'Meiryo', sans-serif;
-    color: #fff4e0; text-shadow: 0 0 2px #1a0c06, 1px 1px 0 #1a0c06, -1px -1px 0 #1a0c06, 1px -1px 0 #1a0c06, -1px 1px 0 #1a0c06;
+    overflow-x: hidden;
   }
-  #debug { position: absolute; left: 12px; top: 10px; font-size: 15px; opacity: 0.85; }
-  #hint { position: absolute; right: 14px; bottom: 12px; font-size: 16px; opacity: 0.9; }
-  #caption {
-    position: absolute; left: 0; right: 0; bottom: 9vh; text-align: center; font-size: clamp(16px, 2.6vw, 26px);
-    opacity: 0; transition: opacity 1.5s;
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; image-rendering: pixelated; }
+  main {
+    position: relative; min-height: 100%; box-sizing: border-box; padding: 6vh 16px 40px;
+    display: flex; flex-direction: column; align-items: center; gap: 4vh;
   }
-  #list {
-    position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
-    opacity: 0; transition: opacity 3s; color: #f4e8d0; gap: 2.2vh;
+  h1 {
+    margin: 0; font-weight: normal; font-size: clamp(34px, 7vw, 72px); color: var(--gold); letter-spacing: 0.12em;
+    text-shadow: 3px 3px 0 #1a0c06;
   }
-  #list h1 { margin: 0; font-weight: normal; font-size: clamp(22px, 3.6vw, 40px); color: #f0d890; letter-spacing: 0.3em; }
-  #list ul {
-    list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(8em, auto));
-    gap: 0.5em 2.5em; font-size: clamp(14px, 2vw, 22px);
+  .lead { margin: -2vh 0 0; color: var(--sub); font-size: clamp(14px, 1.8vw, 18px); text-align: center; line-height: 1.8; }
+  .choices { display: flex; flex-wrap: wrap; gap: 22px; justify-content: center; width: 100%; max-width: 860px; }
+  a.card {
+    flex: 1 1 300px; max-width: 400px; box-sizing: border-box; padding: 26px 24px 22px;
+    background: var(--card); border: 2px solid var(--line); color: var(--ink); text-decoration: none;
+    box-shadow: 4px 4px 0 #1a0c06; transition: background 0.2s, transform 0.2s;
   }
-  #list p { margin: 0; font-size: clamp(13px, 1.7vw, 19px); color: #d8b878; }
+  a.card:hover, a.card:focus-visible { background: var(--card-hover); transform: translateY(-3px); outline: none; }
+  .card h2 { margin: 0 0 10px; font-weight: normal; font-size: clamp(22px, 3vw, 28px); color: var(--gold); }
+  .card p { margin: 0; line-height: 1.8; color: var(--sub); font-size: 15px; }
+  .card .go { display: block; margin-top: 16px; color: var(--ink); font-size: 17px; }
+  .howto { max-width: 640px; color: var(--sub); font-size: 14px; line-height: 1.9; text-align: center; }
+  .howto b { color: var(--ink); font-weight: normal; }
 </style>
 </head>
 <body>
-<canvas id="screen"></canvas>
-<div id="ui">
-  <div id="debug"></div>
-  <div id="hint">クリックでカーソルを固定（Escで解除）</div>
-  <div id="caption"></div>
-  <div id="list"><h1>たべたもの</h1><ul></ul><p></p></div>
-</div>
-<script type="module" src="src/main.js"></script>
+<canvas id="flies"></canvas>
+<main>
+  <h1>ハエの協奏曲</h1>
+  <p class="lead">ハエの大群を動かして、机の上のものを食べよう。<br>増えていく羽音が、いつしか音楽になる。</p>
+  <div class="choices">
+    <a class="card" href="play.html">
+      <h2>ふつうの版</h2>
+      <p>食べたものによって、ハエが赤く染まったり、部屋が暗くなったり、いろいろなことが起こります。レコードを食べると曲が流れます。</p>
+      <span class="go">▶ あそぶ</span>
+    </a>
+    <a class="card" href="ongaku/">
+      <h2>音楽版</h2>
+      <p>どんなものを食べても、そのものの名曲が流れます。バナナは「天国と地獄」、寿司は「さくらさくら」、唐辛子は「熊蜂の飛行」……</p>
+      <span class="go">▶ あそぶ</span>
+    </a>
+  </div>
+  <p class="howto">
+    <b>あそびかた</b>　画面をクリックするとカーソルが固定されます（Esc で解除）。<br>
+    カーソルを動かすと群れがついてきます。画面の縁に押し当てると、机の上をどこまでも飛んでいけます。<br>
+    ハエが画面いっぱいになると、幕が閉じます。音が出ます。
+  </p>
+</main>
+<script>
+  // 背景で数十匹のハエがゆっくり飛び回る（雰囲気づくり。低解像度に描いて拡大する）
+  const cv = document.getElementById('flies');
+  const W = 320, H = 180;
+  cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d');
+  const flies = Array.from({ length: 70 }, () => ({
+    cx: Math.random() * W, cy: Math.random() * H, a: Math.random() * 6.28,
+    r: 4 + Math.random() * 14, w: (Math.random() < 0.5 ? -1 : 1) * (0.8 + Math.random() * 2.2),
+    dx: (Math.random() - 0.5) * 6, dy: (Math.random() - 0.5) * 4,
+  }));
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#16141a';
+    for (const f of flies) {
+      f.a += f.w * dt;
+      f.cx = (f.cx + f.dx * dt + W) % W; f.cy = (f.cy + f.dy * dt + H) % H;
+      const x = Math.round(f.cx + Math.cos(f.a) * f.r + (Math.random() - 0.5));
+      const y = Math.round(f.cy + Math.sin(f.a) * f.r * 0.6 + (Math.random() - 0.5));
+      ctx.fillRect(x, y, 1, 1);
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+</script>
 </body>
 </html>
