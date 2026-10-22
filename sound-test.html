@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>羽音テスト（Step1）</title>
+<style>
+  :root { --bg: #1b130c; --fg: #f1e4cf; --muted: #b59c7c; --accent: #e0a85a; --warn: #ff6b5a; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.6 system-ui, sans-serif; }
+  main { max-width: 640px; margin: 0 auto; padding: 24px 16px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.note { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
+  .row { margin: 18px 0; }
+  label { display: flex; justify-content: space-between; margin-bottom: 4px; }
+  label b { color: var(--accent); font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; }
+  button, select { font: inherit; padding: 8px 16px; background: #3a2817; color: var(--fg); border: 1px solid #6b4a2a; border-radius: 6px; cursor: pointer; }
+  button.on { background: var(--accent); color: #1b130c; }
+  .presets button { padding: 4px 10px; margin: 2px; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 14px; }
+  td { padding: 3px 0; border-bottom: 1px solid #3a2817; }
+  td:last-child { text-align: right; }
+  .meter { height: 10px; background: #3a2817; border-radius: 5px; overflow: hidden; }
+  .meter > div { height: 100%; width: 0; background: var(--accent); transition: width .05s; }
+  .warn { color: var(--warn); }
+</style>
+</head>
+<body>
+<main>
+  <h1>羽音テスト（Step 1）</h1>
+  <p class="note">ハエの数と音程を変えて、羽音の「層の増え方」と音割れ・重さが出る限界を確かめるページ。ヘッドホン推奨・音量は小さめから。</p>
+
+  <div class="row">
+    <button id="start">開始</button>
+    <select id="maxVoices" title="声部の上限（負荷テスト用）">
+      <option value="8">声部上限 8</option>
+      <option value="24" selected>声部上限 24（既定）</option>
+      <option value="48">声部上限 48</option>
+      <option value="96">声部上限 96</option>
+      <option value="192">声部上限 192</option>
+      <option value="400">声部上限 400</option>
+    </select>
+    <select id="tuning" title="音程の割り当て">
+      <option value="natural" selected>自然な散らばり</option>
+      <option value="pentatonic">案A: ペンタトニック</option>
+    </select>
+  </div>
+
+  <div class="row">
+    <label>ハエの数 <b id="nVal">1</b></label>
+    <input id="n" type="range" min="0" max="1000" step="1" value="0">
+    <div class="presets">
+      <button data-n="1">1</button><button data-n="3">3</button><button data-n="10">10</button>
+      <button data-n="30">30</button><button data-n="100">100</button><button data-n="300">300</button>
+      <button data-n="1000">1000</button><button id="sweep">1→1000 を60秒で</button>
+    </div>
+  </div>
+
+  <div class="row">
+    <label>音程シフト <b id="pVal">0 半音</b></label>
+    <input id="pitch" type="range" min="-12" max="12" step="0.5" value="0">
+  </div>
+
+  <div class="row">
+    <label>出力ピーク <b id="peakVal">-∞ dBFS</b></label>
+    <div class="meter"><div id="peakBar"></div></div>
+  </div>
+
+  <table>
+    <tr><td>鳴っている声部 / 上限</td><td id="sVoices">-</td></tr>
+    <tr><td>オシレーター数（概算）</td><td id="sOsc">-</td></tr>
+    <tr><td>コンプレッサー圧縮量</td><td id="sComp">-</td></tr>
+    <tr><td>リミッター圧縮量</td><td id="sLim">-</td></tr>
+    <tr><td>クリップ検出回数（|サンプル| ≥ 0.99）</td><td id="sClip">0</td></tr>
+    <tr><td>描画フレームの最大間隔（直近2秒）</td><td id="sFrame">-</td></tr>
+    <tr><td>音声の途切れ（ブラウザ対応時のみ）</td><td id="sUnder">未対応</td></tr>
+  </table>
+  <p class="note">限界の測り方: 声部上限を上げながら n=1000 にし、「プチプチ音」「音の途切れ」「描画フレーム間隔の悪化」が出始める上限値を記録する。</p>
+</main>
+
+<script type="module">
+import { createWingSound, TUNINGS } from './src/wingsound.js';
+
+const $ = (id) => document.getElementById(id);
+let ctx = null, wing = null, analyser = null, buf = null;
+let clips = 0, sweepTimer = 0;
+
+// スライダーは 0..1000 の直線だと小さい数が操作しづらいので、対数に写像する
+const sliderToN = (v) => v <= 0 ? 1 : Math.round(Math.pow(1000, v / 1000));
+const nToSlider = (n) => Math.round(Math.log(Math.max(1, n)) / Math.log(1000) * 1000);
+
+function currentN() { return sliderToN(Number($('n').value)); }
+
+function build() {
+  if (wing) wing.dispose();
+  const tuning = $('tuning').value === 'pentatonic' ? TUNINGS.pentatonic : null;
+  wing = createWingSound(ctx, { maxVoices: Number($('maxVoices').value), tuning });
+  wing.connect(analyser);
+  wing.setPitchShift(Number($('pitch').value));
+  wing.setCount(currentN());
+}
+
+$('start').onclick = async () => {
+  if (!ctx) {
+    ctx = new AudioContext();
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 2048;
+    buf = new Float32Array(analyser.fftSize);
+    analyser.connect(ctx.destination);
+    build();
+    requestAnimationFrame(loop);
+  }
+  if (ctx.state === 'running') { await ctx.suspend(); $('start').textContent = '再開'; $('start').classList.remove('on'); }
+  else { await ctx.resume(); $('start').textContent = '一時停止'; $('start').classList.add('on'); }
+};
+
+$('maxVoices').onchange = () => { if (ctx) build(); };
+$('tuning').onchange = () => { if (ctx) build(); };
+
+$('n').oninput = () => {
+  const n = currentN();
+  $('nVal').textContent = n;
+  if (wing) wing.setCount(n);
+};
+document.querySelectorAll('.presets [data-n]').forEach((b) => {
+  b.onclick = () => { clearInterval(sweepTimer); $('n').value = nToSlider(Number(b.dataset.n)); $('n').oninput(); };
+});
+$('sweep').onclick = () => {
+  clearInterval(sweepTimer);
+  const t0 = performance.now();
+  sweepTimer = setInterval(() => {
+    const t = Math.min(1, (performance.now() - t0) / 60000);
+    $('n').value = Math.round(t * 1000);
+    $('n').oninput();
+    if (t >= 1) clearInterval(sweepTimer);
+  }, 100);
+};
+$('pitch').oninput = () => {
+  const p = Number($('pitch').value);
+  $('pVal').textContent = `${p > 0 ? '+' : ''}${p} 半音`;
+  if (wing) wing.setPitchShift(p);
+};
+
+const frameGaps = [];
+let lastFrame = performance.now();
+function loop(now) {
+  frameGaps.push([now, now - lastFrame]);
+  lastFrame = now;
+  while (frameGaps.length && now - frameGaps[0][0] > 2000) frameGaps.shift();
+
+  analyser.getFloatTimeDomainData(buf);
+  let peak = 0;
+  for (let i = 0; i < buf.length; i++) {
+    const a = Math.abs(buf[i]);
+    if (a > peak) peak = a;
+    if (a >= 0.99) clips++;
+  }
+  const db = peak > 0 ? 20 * Math.log10(peak) : -Infinity;
+  $('peakVal').textContent = `${isFinite(db) ? db.toFixed(1) : '-∞'} dBFS`;
+  $('peakVal').className = db > -1 ? 'warn' : '';
+  $('peakBar').style.width = `${Math.max(0, Math.min(100, (db + 48) / 48 * 100))}%`;
+
+  const s = wing.stats();
+  $('sVoices').textContent = `${s.voices} / ${s.maxVoices}`;
+  $('sOsc').textContent = s.oscillators;
+  $('sComp').textContent = `${s.compReduction.toFixed(1)} dB`;
+  $('sLim').textContent = `${s.limiterReduction.toFixed(1)} dB`;
+  $('sClip').textContent = clips;
+  $('sClip').className = clips ? 'warn' : '';
+  const maxGap = Math.max(...frameGaps.map((g) => g[1]));
+  $('sFrame').textContent = `${maxGap.toFixed(0)} ms`;
+  $('sFrame').className = maxGap > 50 ? 'warn' : '';
+
+  // 実験的 API（Chrome の AudioContext.playbackStats 等）。無ければ「未対応」のまま
+  const ps = ctx.playbackStats;
+  if (ps && typeof ps.underrunEvents === 'number') $('sUnder').textContent = `${ps.underrunEvents} 回`;
+
+  requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>
